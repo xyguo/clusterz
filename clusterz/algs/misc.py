@@ -8,7 +8,7 @@ from sklearn.utils import check_array
 class DistQueryOracle(object):
 
     def __init__(self,
-                 tree_algorithm='auto', leaf_size=40, p=2,
+                 tree_algorithm='auto', leaf_size=30, p=2,
                  metric='minkowski',
                  # below are parameters for LSHForest specifically
                  n_estimators=10,
@@ -87,8 +87,14 @@ class DistQueryOracle(object):
         :return:
         """
         if self.tree_algorithm == 'auto':
-            self.nn_tree_ = BallTree(X, leaf_size=self.leaf_size, metric=self.metric)
-            warnings.warn("Currently `auto` defaults to KD-Tree\n", UserWarning)
+            if X.shape[1] < 20:
+                self.nn_tree_ = KDTree(X, leaf_size=self.leaf_size, metric=self.metric)
+                self.tree_algorithm = 'kd_tree'
+            elif X.shape[0] < 40:
+                self.tree_algorithm = 'brute'
+            else:
+                self.nn_tree_ = BallTree(X, leaf_size=self.leaf_size, metric=self.metric)
+                self.tree_algorithm = 'ball_tree'
         elif self.tree_algorithm == 'kd_tree':
             self.nn_tree_ = KDTree(X, leaf_size=self.leaf_size, metric=self.metric)
         elif self.tree_algorithm == 'ball_tree':

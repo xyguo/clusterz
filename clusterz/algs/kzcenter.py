@@ -10,13 +10,14 @@ import numpy as np
 
 from sklearn.exceptions import NotFittedError
 from .misc import DistQueryOracle
+from ..utils import debug_print
 
 
 class DistributedKZCenter(object):
 
     def __init__(self,
                  n_clusters=None, n_outliers=None, n_machines=None,
-                 epsilon=0.1, delta=0.01, random_state=None):
+                 epsilon=0.1, delta=0.01, random_state=None, debug=False):
         """
         Serves as the master node
 
@@ -36,6 +37,8 @@ class DistributedKZCenter(object):
             error tolerance parameter for estimating the optimal radius
 
         :param random_state: numpy.RandomState
+
+        :param debug: boolean, whether output debugging information
         """
         self.n_clusters = n_clusters
         self.n_outliers = n_outliers
@@ -43,6 +46,7 @@ class DistributedKZCenter(object):
         self.epsilon = epsilon
         self.delta = delta
         self.random_state = random_state
+        self.debugging = debug
 
         self.fitted_centers_ = None
         self.n_samples_, self.n_features_ = None, None
@@ -64,10 +68,15 @@ class DistributedKZCenter(object):
             sample_weights = [None] * len(Xs)
 
         self.n_machines = len(Xs)
+
+        debug_print("Build distance query oracle ...", debug=self.debugging)
         oracles = []
         for i in range(self.n_machines):
-            oracles.append(DistQueryOracle(tree_algorithm='ball_tree').fit(Xs[i]))
+            oracles.append(DistQueryOracle(tree_algorithm='auto',
+                                           leaf_size=min(Xs[i].shape[0] // self.n_clusters, 30))
+                           .fit(Xs[i]))
 
+        debug_print("Initialize mappers ...", debug=self.debugging)
         mappers = []
         for i in range(self.n_machines):
             mappers.append(KZCenter(
@@ -80,11 +89,15 @@ class DistributedKZCenter(object):
         self.n_samples_ = sum(X.shape[0] for X in Xs)
 
         # estimating the optimal radius using binary search
+        debug_print("Start guessing optimal radius ...", debug=self.debugging)
+        n_guesses = 1 # used for debugging
         total_iters_threshold = self.n_outliers * self.n_machines * (1 + 1 / self.epsilon)
         lb = 0
+        # upper bound is initialized as the sum of diameters across all machines
         ub = sum(oc.estimate_diameter(n_estimation=10)[1] for oc in oracles)
         guessed_opt = (lb + ub) / 2
         while ub > (1+self.delta) * lb:
+            debug_print("{}-th guess: trying with OPT = {}".format(n_guesses, guessed_opt), debug=self.debugging)
             for i, m in enumerate(mappers):
                 m.fit(guessed_opt, Xs[i], sample_weights[i])
             total_iters = sum(m.n_iters for m in mappers)
@@ -98,15 +111,19 @@ class DistributedKZCenter(object):
             else:
                 ub = guessed_opt
             guessed_opt = (lb + ub) / 2
+            n_guesses += 1
 
+        debug_print("Estimated optimal radius: {}".format(ub), debug=self.debugging)
         self.opt_ = ub
 
         # construct the centralized data set
+        debug_print("Aggregate results on reducer ...", debug=self.debugging)
         for i, m in enumerate(mappers):
             m.fit(guessed_opt, Xs[i], sample_weights[i])
         X = np.vstack([m.fitted_centers for m in mappers])
         sample_weight = np.hstack([m.clusters_size for m in mappers])
 
+        debug_print("Fit the aggregated data set ...", debug=self.debugging)
         reducer = KZCenter(is_mapper=False, is_reducer=True,
                            n_clusters=self.n_clusters,
                            n_outliers=(1 + self.epsilon) * self.n_outliers,
@@ -232,7 +249,7 @@ class KZCenter(object):
                 break
             if len(covered_pts) < threshold:
                 break
-            to_be_removed = self.dist_oracle.ball(p, 4 * guessed_opt)[0]
+            to_be_removed = self.dist_oracle.ball(p.reshape(1, -1), 4 * guessed_opt)[0]
             removed.update(to_be_removed)
             w_p = len(covered_pts)
             results.append((p, w_p))
@@ -268,7 +285,7 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None, n_clusters=7, n_o
 
     # estimate the upperbound and lowerbound of opt for the data set
     _, ub = dist_oracle.estimate_diameter(n_estimation=10)
-    lb, _ = dist_oracle.kneighbors(X[np.random.randint(0, n_samples)], k=2)
+    lb, _ = dist_oracle.kneighbors(X[np.random.randint(0, n_distinct_points)], k=2)
     lb = np.max(lb)
     if guessed_opt is not None:
         guessed_opt = min(guessed_opt, ub)
@@ -284,7 +301,7 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None, n_clusters=7, n_o
             if len(removed) == n_distinct_points:
                 break
             p, covered_pts = dist_oracle.densest_ball(2 * guessed_opt, removed)
-            removed.update(dist_oracle.ball(p, 4 * guessed_opt))
+            removed.update(dist_oracle.ball(p.reshape(1, -1), 4 * guessed_opt)[0])
             w_p = sum(sample_weight[covered_pts])
             results.append((p, w_p))
         n_covered = sum(wp for _, wp in results)

@@ -1,0 +1,1 @@
+from .syn_data import gaussian_mixture, add_outliers
