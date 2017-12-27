@@ -87,11 +87,21 @@ class DistributedKZCenter(object):
             ))
 
         self.n_samples_ = sum(X.shape[0] for X in Xs)
+        self.n_features_ = Xs[0].shape[1]
+        # if the number of allowed outliers are more than n_samples then we
+        # simply choose arbitrary n_clusters points in the data set as centers
+        if self.n_samples_ <= (1 + self.epsilon) * self.n_outliers:
+            while len(self.fitted_centers_) < min(self.n_clusters, self.n_samples_):
+                for X in Xs:
+                    for i in range(min(X.shape[0], self.n_clusters)):
+                        self.fitted_centers_.append(X[i])
+            return self
 
         # estimating the optimal radius using binary search
         debug_print("Start guessing optimal radius ...", debug=self.debugging)
-        n_guesses = 1 # used for debugging
-        total_iters_threshold = self.n_outliers * self.n_machines * (1 + 1 / self.epsilon)
+        n_guesses = 1  # used for debugging
+        total_iters_at_most = self.n_clusters * self.n_machines * (1 + 1 / self.epsilon)
+        total_covered_at_least = max(self.n_samples_ - (1+self.epsilon) * self.n_outliers, 1)
         lb = 0
         # upper bound is initialized as the sum of diameters across all machines
         ub = sum(oc.estimate_diameter(n_estimation=10)[1] for oc in oracles)
@@ -105,8 +115,7 @@ class DistributedKZCenter(object):
 
             # if the number of balls constructed is too large, or
             # the number of points covered is to small, then enlarge guessed opt
-            if total_iters > total_iters_threshold or \
-                total_covered < self.n_samples_ - (1+self.epsilon) * self.n_outliers:
+            if total_iters > total_iters_at_most or total_covered < total_covered_at_least:
                 lb = guessed_opt
             else:
                 ub = guessed_opt
@@ -240,10 +249,12 @@ class KZCenter(object):
         threshold = self.epsilon * self.n_outliers / (self.n_clusters * self.n_machines)
         results = []
         removed = set()
+        to_be_updated = range(self.n_samples_)
         self.n_iters_ = 0
         while len(removed) < self.n_samples_:
-            p, covered_pts = self.dist_oracle.densest_ball(2 * guessed_opt,
-                                                           except_for=removed)
+            p, covered_pts = self.dist_oracle.densest_ball_faster_but_dirty(2 * guessed_opt,
+                                                                            changed=to_be_updated,
+                                                                            except_for=removed)
 
             if p is None:
                 break
@@ -254,6 +265,12 @@ class KZCenter(object):
             w_p = len(covered_pts)
             results.append((p, w_p))
             self.n_iters_ += 1
+
+            # after removing ball(p, 4L), only the densest ball whose centers resides
+            # in ball(p, 6L) \ ball(p, 4L) is affected. So we only need to consider
+            to_be_updated = set(self.dist_oracle.ball(p.reshape(1, -1), 6 * guessed_opt)[0])
+            to_be_updated.difference_update(to_be_removed)
+
         return results
 
 

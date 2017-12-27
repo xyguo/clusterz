@@ -65,15 +65,22 @@ class DistQueryOracle(object):
         self.random_state = random_state
 
         self.nn_tree_ = None
+        self.ball_oracle_ = None
         self.fitted_data_ = None
         self.data_weight_ = None
         self.diam_ = None
         self.n_samples_, self.n_features_ = None, None
         self.new_data = True
 
+        # variables used for supporting fast densest-ball query and removing
+        self.ball_size_cache_ = None
+        self.ball_radius_cache_ = None
+        self.ball_cache_ = None
+        self.cache_inconsistent_ = None
+
     @property
     def is_fitted(self):
-        return self.nn_tree_ is not None
+        return self.ball_oracle_ is not None
 
     def fit(self, X, sample_weight=None):
         """
@@ -89,16 +96,21 @@ class DistQueryOracle(object):
         if self.tree_algorithm == 'auto':
             if X.shape[1] < 20:
                 self.nn_tree_ = KDTree(X, leaf_size=self.leaf_size, metric=self.metric)
-                self.tree_algorithm = 'kd_tree'
+                self.ball_oracle_ = lambda cs, r: self.nn_tree_.query_radius(cs, r, return_distance=False)
             elif X.shape[0] < 40:
-                self.tree_algorithm = 'brute'
+                self.ball_oracle_ = lambda cs, r: _brute_force_ball(X, cs, r)
             else:
                 self.nn_tree_ = BallTree(X, leaf_size=self.leaf_size, metric=self.metric)
-                self.tree_algorithm = 'ball_tree'
+                self.ball_oracle_ = lambda cs, r: self.nn_tree_.query_radius(cs, r, return_distance=False)
+
         elif self.tree_algorithm == 'kd_tree':
             self.nn_tree_ = KDTree(X, leaf_size=self.leaf_size, metric=self.metric)
+            self.ball_oracle_ = lambda cs, r: self.nn_tree_.query_radius(cs, r, return_distance=False)
+
         elif self.tree_algorithm == 'ball_tree':
             self.nn_tree_ = BallTree(X, leaf_size=self.leaf_size, metric=self.metric)
+            self.ball_oracle_ = lambda cs, r: self.nn_tree_.query_radius(cs, r, return_distance=False)
+
         elif self.tree_algorithm == 'lsh':
             self.nn_tree_ = LSHForest(n_estimators=self.n_estimators,
                                       radius=self.radius,
@@ -108,156 +120,126 @@ class DistQueryOracle(object):
                                       radius_cutoff_ratio=self.radius_cutoff_ratio,
                                       random_state=self.random_state)
             self.nn_tree_.fit(X)
+            self.ball_oracle_ = lambda cs, r: self.nn_tree_.radius_neighbors(cs, r, return_distance=False)
+
         elif self.tree_algorithm == 'brute':
-            pass
+            self.ball_oracle_ = lambda cs, r: _brute_force_ball(X, cs, r)
+
         else:
             raise ValueError("tree_algorithm \"{}\" not properly specified".
                              format(self.tree_algorithm))
 
         self.fitted_data_ = X
         self.n_samples_, self.n_features_ = X.shape
-        self.data_weight_ = sample_weight if sample_weight is not None else np.ones(X.shape[0])
+        self.data_weight_ = sample_weight if sample_weight is not None else np.ones(X.shape[0], dtype=np.int)
 
         return self
 
     def ball(self, centers, radius):
         """
-        Query the data points in X that are within distance radius to center
+        Query the data points in X that are within distance radius to centers
         :param centers: queried points
         :param radius: radius of the ball
-        :return: an array of index in the fitted dataset X
+        :return: an array of array,
+            indices for each center in centers
         """
-        if self.nn_tree_ is None and self.tree_algorithm != 'brute':
+        if self.ball_oracle_ is None:
             raise NotFittedError("Tree hasn't been fitted yet\n")
 
         centers = check_array(centers, ensure_2d=True)
-        if self.tree_algorithm == 'brute':
-            return self._brute_force_ball(centers, radius)
-        elif self.tree_algorithm == 'kd_tree' or self.tree_algorithm == 'ball_tree':
-            return self.nn_tree_.query_radius(centers, radius, return_distance=False)
-        elif self.tree_algorithm == 'lsh':
-            return self.nn_tree_.radius_neighbors(centers, radius, return_distance=False)
-        else:
-            raise ValueError("Tree algorithm `{}` unknown\n".format(self.tree_algorithm))
+        return self.ball_oracle_(centers, radius)
 
     def densest_ball(self, radius, except_for=None):
         """
 
         :param radius:
         :param except_for: array-like, indices of points that should not be considered
-        :return: array of index of points in the fitted data set
+        :return (densest_center, densest_ball): (array of shape=(n_features,), array of shape=(n_covered,)
+            the center of the densest ball as well as the index of points the ball covers
         """
         if except_for is None or len(except_for) == 0:
             except_for = None
 
-        if self.nn_tree_ is None and self.tree_algorithm != 'brute':
+        if self.ball_oracle_ is None:
             raise NotFittedError("Tree hasn't been fitted yet\n")
 
         if except_for is not None and len(except_for) == self.n_samples_:
             return None, None
 
-        if self.tree_algorithm == 'brute':
-            center, densest_ball = self._brute_find_densest_ball(radius, except_for)
-        elif self.tree_algorithm == 'kd_tree':
-            center, densest_ball = self._kd_tree_find_densest_ball(radius, except_for)
-        elif self.tree_algorithm == 'ball_tree':
-            center, densest_ball = self._ball_tree_find_densest_ball(radius, except_for)
-        elif self.tree_algorithm == 'lsh':
-            center, densest_ball = self._lsh_find_densest_ball(radius, except_for)
-        else:
-            raise ValueError("Tree algorithm `{}` unknown\n".format(self.tree_algorithm))
-
-        return center, densest_ball
-
-    def _find_densest_ball_center(self, radius, except_for, tree_method, **kwargs):
-        """
-        
-        :param x: 
-        :param radius: 
-        :param except_for: 
-        :param tree_method: a function that accepts argument (Cs, R, **kwargs)
-            tree_method should return the array of indices of points in the ball of radius R
-            for each center point in Cs
-        :param kwargs: 
-        :return: (center, ball)
-            the center of the densest ball and the indices of elements contained in the ball
-        """
-
-        # TODO: accelerate this function
         if except_for is None:
             densest_idx, _ = max(
-                ((i, self.data_weight_[tree_method(x.reshape(1, -1), radius, **kwargs)[0]].sum())
+                ((i, self.data_weight_[self.ball_oracle_(x.reshape(1, -1), radius)[0]].sum())
                  for i, x in enumerate(self.fitted_data_)),
                 key=lambda a: a[1]
             )
             densest_center = self.fitted_data_[densest_idx]
-            densest_ball = tree_method(densest_center.reshape(1, -1), radius, **kwargs)[0]
+            densest_ball = self.ball_oracle_(densest_center.reshape(1, -1), radius)[0]
         else:
             densest_idx, _ = max(
-                ((i, self.data_weight_[list(set(tree_method(x.reshape(1, -1), radius, **kwargs)[0]).
+                ((i, self.data_weight_[list(set(self.ball_oracle_(x.reshape(1, -1), radius)[0]).
                                             difference(except_for))].sum())
                  for i, x in enumerate(self.fitted_data_) if i not in except_for),
                 key=lambda a: a[1]
             )
             densest_center = self.fitted_data_[densest_idx]
-            densest_ball = np.array(list(set(tree_method(densest_center.reshape(1, -1), radius, **kwargs)[0]).
+            densest_ball = np.array(list(set(self.ball_oracle_(densest_center.reshape(1, -1), radius)[0]).
                                          difference(except_for)))
         # assert len(densest_ball) > 0
         return densest_center, densest_ball
 
-    def _brute_find_densest_ball(self, radius, except_for):
-        # TODO: estimate time complexity
-        additional_kwargs = dict()
-        center, ball = self._find_densest_ball_center(radius, except_for,
-                                                      self._brute_force_ball, **additional_kwargs)
-        return center, ball
+    def densest_ball_faster_but_dirty(self, radius, except_for, changed):
+        # TODO: what is the actual complexity of radius_query for BallTree, KDTree, or LSHForest?
+        # TODO: what is the actual complexity of set difference in Python
+        # They said that if I can run fast enough, sadness wouldn't catch me up.
+        if self.ball_radius_cache_ != radius or self.cache_inconsistent_:
+            # new search begins, should refresh all caches
+            self.ball_radius_cache_ = radius
+            self.ball_size_cache_ = [None] * self.n_samples_
+            self.ball_cache_ = [None] * self.n_samples_
+            self.cache_inconsistent_ = False
+        if self.ball_size_cache_ is None:
+            self.ball_size_cache_ = [None] * self.n_samples_
 
-    def _kd_tree_find_densest_ball(self, radius, except_for):
-        # TODO: estimate time complexity
-        additional_kwargs = dict()
-        center, ball = self._find_densest_ball_center(radius, except_for,
-                                                      self.nn_tree_.query_radius, **additional_kwargs)
-        return center, ball
-
-    def _ball_tree_find_densest_ball(self, radius, except_for):
-        # TODO: estimate time complexity
-        additional_kwargs = dict()
-        center, ball = self._find_densest_ball_center(radius, except_for,
-                                                      self.nn_tree_.query_radius, **additional_kwargs)
-        return center, ball
-
-    def _lsh_find_densest_ball(self, radius, except_for):
-        # TODO: estimate time complexity
-        additional_kwargs = {'return_distance': False}
-        center, ball = self._find_densest_ball_center(radius, except_for,
-                                                      self.nn_tree_.radius_neighbors, **additional_kwargs)
-        return center, ball
-
-    def _brute_force_ball(self, centers, radius, except_for=None, count_only=False):
-        """
-
-        :param centers: array of centers queried
-        :param radius:
-        :param except_for: array-like
-        :param count_only:
-        :return: list of arrays
-            list of data idxs
-        """
-        centers = check_array(centers, ensure_2d=True)
         if except_for is None:
-            if count_only:
-                return list(np.sum(np.linalg.norm(self.fitted_data_ - c, axis=1) <= radius)
-                            for c in centers)
+            except_for = {}
+        if changed is None:
+            changed = range(self.n_samples_)
+
+        densest_idx = None
+        densest_ball_size = 0
+
+        # the intersection between changed and except_for should be empty
+        for i in changed:
+            if i in except_for:
+                continue
+
+            x = self.fitted_data_[i]
+            if self.ball_cache_[i] is None:
+                self.ball_cache_[i] = set(self.ball_oracle_(x.reshape(1, -1), radius)[0])
+            if len(except_for) / len(self.ball_cache_[i]) > 10:
+                self.ball_cache_[i].difference_update(except_for.intersection(self.ball_cache_[i]))
             else:
-                return list(np.where(np.linalg.norm(self.fitted_data_ - c, axis=1) <= radius)[0]
-                            for c in centers)
-        else:
-            idxs = list(np.where(np.linalg.norm(self.fitted_data_ - c, axis=1) <= radius)[0]
-                        for c in centers)
-            if count_only:
-                return list(len(set(idx).difference(except_for)) for idx in idxs)
-            else:
-                return list(np.array(list(set(idx).difference(except_for))) for idx in idxs)
+                self.ball_cache_[i].difference_update(except_for)
+            self.ball_size_cache_[i] = self.data_weight_[list(self.ball_cache_[i])].sum()
+            # if a ball covers all points, then it must be the densest one
+            if self.ball_size_cache_[i] == self.n_samples_ - len(except_for):
+                self.cache_inconsistent_ = True
+                return self.fitted_data_[i], self.ball_cache_[i]
+
+        for i in range(self.n_samples_):
+            if i in except_for:
+                continue
+
+            # if a ball covers all points, then it must be the densest one
+            if self.ball_size_cache_[i] == self.n_samples_ - len(except_for):
+                self.cache_inconsistent_ = True
+                return self.fitted_data_[i], self.ball_cache_[i]
+
+            if densest_ball_size < len(self.ball_cache_[i]):
+                densest_ball_size = len(self.ball_cache_[i])
+                densest_idx = i
+
+        return self.fitted_data_[densest_idx], self.ball_cache_[densest_idx]
 
     def estimate_diameter(self, n_estimation=None):
         """
@@ -333,3 +315,22 @@ class DistQueryOracle(object):
             return (dists[nearest], nearest) if return_distance else nearest
         else:
             raise ValueError("Tree algorithm `{}` unknown\n".format(self.tree_algorithm))
+
+
+def _brute_force_ball(X, centers, radius, count_only=False):
+    """
+
+    :param centers: array of centers queried
+    :param radius:
+    :param except_for: array-like
+    :param count_only:
+    :return: list of arrays
+        list of data idxs
+    """
+    centers = check_array(centers, ensure_2d=True)
+    if count_only:
+        return list(np.sum(np.linalg.norm(X - c, axis=1) <= radius)
+                    for c in centers)
+    else:
+        return list(np.where(np.linalg.norm(X - c, axis=1) <= radius)[0]
+                    for c in centers)
