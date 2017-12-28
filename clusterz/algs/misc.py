@@ -8,7 +8,7 @@ from sklearn.utils import check_array
 class DistQueryOracle(object):
 
     def __init__(self,
-                 tree_algorithm='auto', leaf_size=30, p=2,
+                 tree_algorithm='auto', leaf_size=30,
                  metric='minkowski',
                  # below are parameters for LSHForest specifically
                  n_estimators=10,
@@ -73,6 +73,7 @@ class DistQueryOracle(object):
         self.new_data = True
 
         # variables used for supporting fast densest-ball query and removing
+        self.ball_weight_cache_ = None
         self.ball_size_cache_ = None
         self.ball_radius_cache_ = None
         self.ball_cache_ = None
@@ -153,7 +154,8 @@ class DistQueryOracle(object):
         """
 
         :param radius:
-        :param except_for: array-like, indices of points that should not be considered
+        :param except_for: iterable or set,
+            indices of points that should not be considered
         :return (densest_center, densest_ball): (array of shape=(n_features,), array of shape=(n_covered,)
             the center of the densest ball as well as the index of points the ball covers
         """
@@ -188,25 +190,41 @@ class DistQueryOracle(object):
         return densest_center, densest_ball
 
     def densest_ball_faster_but_dirty(self, radius, except_for, changed):
+        """
+        When the radius is fixed and need to do a series of query, then this function
+        will cache previous calculated balls for fast retrieving.
+
+        Warning: This function implementation is coupled with the one that invokes it. Shouldn't
+        be called by other functions except for KZCenter.fit.
+        :param radius:
+        :param except_for: iterable or set,
+            indices of points that should not be considered
+        :param changed: iterable or set,
+            indices in cache that need to be updated
+        :return (densest_center, densest_ball): (array of shape=(n_features,), array of shape=(n_covered,)
+            the center of the densest ball as well as the index of points the ball covers:
+        """
         # TODO: what is the actual complexity of radius_query for BallTree, KDTree, or LSHForest?
-        # TODO: what is the actual complexity of set difference in Python
         # They said that if I can run fast enough, sadness wouldn't catch me up.
-        if self.ball_radius_cache_ != radius or self.cache_inconsistent_:
+
+        if self.ball_radius_cache_ != radius:
             # new search begins, should refresh all caches
             self.ball_radius_cache_ = radius
+            self.ball_weight_cache_ = [None] * self.n_samples_
             self.ball_size_cache_ = [None] * self.n_samples_
             self.ball_cache_ = [None] * self.n_samples_
             self.cache_inconsistent_ = False
-        if self.ball_size_cache_ is None:
-            self.ball_size_cache_ = [None] * self.n_samples_
+
+        if self.cache_inconsistent_:
+            warnings.warn("Cache is inconsistent, may get outdated result\n", UserWarning)
+
+        if self.ball_weight_cache_ is None:
+            self.ball_weight_cache_ = [None] * self.n_samples_
 
         if except_for is None:
             except_for = {}
         if changed is None:
             changed = range(self.n_samples_)
-
-        densest_idx = None
-        densest_ball_size = 0
 
         # the intersection between changed and except_for should be empty
         for i in changed:
@@ -216,27 +234,42 @@ class DistQueryOracle(object):
             x = self.fitted_data_[i]
             if self.ball_cache_[i] is None:
                 self.ball_cache_[i] = set(self.ball_oracle_(x.reshape(1, -1), radius)[0])
+
+            # update ball cache
             if len(except_for) / len(self.ball_cache_[i]) > 10:
                 self.ball_cache_[i].difference_update(except_for.intersection(self.ball_cache_[i]))
             else:
                 self.ball_cache_[i].difference_update(except_for)
-            self.ball_size_cache_[i] = self.data_weight_[list(self.ball_cache_[i])].sum()
+
+            self.ball_size_cache_[i] = len(self.ball_cache_[i])
+            self.ball_weight_cache_[i] = self.data_weight_[list(self.ball_cache_[i])].sum()
             # if a ball covers all points, then it must be the densest one
             if self.ball_size_cache_[i] == self.n_samples_ - len(except_for):
                 self.cache_inconsistent_ = True
                 return self.fitted_data_[i], self.ball_cache_[i]
+
+        densest_idx = None
+        densest_ball_weight = 0
 
         for i in range(self.n_samples_):
             if i in except_for:
                 continue
 
+            # because ball_cache can become inconsistent due to early returning
+            if self.ball_cache_[i] is None:
+                self.ball_cache_[i] = set(self.ball_oracle_(x.reshape(1, -1), radius)[0])
+                self.ball_cache_[i].difference_update(except_for)
+                self.ball_size_cache_[i] = len(self.ball_cache_[i])
+                self.ball_weight_cache_[i] = self.data_weight_[list(self.ball_cache_[i])].sum()
+
             # if a ball covers all points, then it must be the densest one
+            # this serves as an early return, but
             if self.ball_size_cache_[i] == self.n_samples_ - len(except_for):
                 self.cache_inconsistent_ = True
                 return self.fitted_data_[i], self.ball_cache_[i]
 
-            if densest_ball_size < len(self.ball_cache_[i]):
-                densest_ball_size = len(self.ball_cache_[i])
+            if densest_ball_weight < self.ball_weight_cache_[i]:
+                densest_ball_weight = self.ball_weight_cache_[i]
                 densest_idx = i
 
         return self.fitted_data_[densest_idx], self.ball_cache_[densest_idx]
@@ -322,7 +355,6 @@ def _brute_force_ball(X, centers, radius, count_only=False):
 
     :param centers: array of centers queried
     :param radius:
-    :param except_for: array-like
     :param count_only:
     :return: list of arrays
         list of data idxs

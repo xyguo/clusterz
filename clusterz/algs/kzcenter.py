@@ -19,7 +19,7 @@ class DistributedKZCenter(object):
                  n_clusters=None, n_outliers=None, n_machines=None,
                  epsilon=0.1, delta=0.01, random_state=None, debug=False):
         """
-        Serves as the master node
+        Serves as the master node.
 
         :param n_clusters: integer.
             Number of clusters.
@@ -52,18 +52,36 @@ class DistributedKZCenter(object):
         self.n_samples_, self.n_features_ = None, None
         self.opt_ = None
 
-    def cost(self, X, consider_outliers=True):
+    def cost(self, X, remove_outliers=True):
+        """
+
+        :param X: array,
+            data set
+        :param remove_outliers: boolean, default True
+            whether to remove outliers when computing the cost on X
+        :return: float,
+            actual cost
+        """
         if self.fitted_centers_ is None:
             raise NotFittedError("Model hasn't been fitted yet\n")
         dists = [np.min(np.linalg.norm(x - self.fitted_centers_, axis=1))
                  for x in X]
         dists.sort()
-        if consider_outliers:
+        if remove_outliers:
             return dists[-int((1+self.epsilon) * self.n_outliers + 1)]
         else:
             return dists[-1]
 
     def fit(self, Xs, sample_weights=None):
+        """
+
+        :param Xs: list of arrays of shape=(n_samples_i, n_features),
+            Divided data set. Each array in the list represents a bunch of data
+            that has been partitioned onto one machine.
+        :param sample_weights: list of arrays of shape=(n_samples_i,),
+            sample weights for each machine's data
+        :return self:
+        """
         if sample_weights is None:
             sample_weights = [None] * len(Xs)
 
@@ -106,7 +124,7 @@ class DistributedKZCenter(object):
         # upper bound is initialized as the sum of diameters across all machines
         ub = sum(oc.estimate_diameter(n_estimation=10)[1] for oc in oracles)
         guessed_opt = (lb + ub) / 2
-        while ub > (1+self.delta) * lb:
+        while ub > (1+self.delta) * lb and ub > 1e-3:
             debug_print("{}-th guess: trying with OPT = {}".format(n_guesses, guessed_opt), debug=self.debugging)
             for i, m in enumerate(mappers):
                 m.fit(guessed_opt, Xs[i], sample_weights[i])
@@ -122,6 +140,8 @@ class DistributedKZCenter(object):
             guessed_opt = (lb + ub) / 2
             n_guesses += 1
 
+        if ub < 1e-3:
+            warnings.warn("guessed OPT={} is smaller than 1e-3\n".format(ub), UserWarning)
         debug_print("Estimated optimal radius: {}".format(ub), debug=self.debugging)
         self.opt_ = ub
 
@@ -152,6 +172,8 @@ class KZCenter(object):
                  n_clusters=None, n_outliers=None, n_machines=None,
                  epsilon=0.1, random_state=None, oracle=None):
         """
+        Worker object on single machine. Can conduct pre-clustering or regular
+        clustering tasks.
 
         :param is_mapper: boolean.
             True if the current object act as a mapper.
@@ -215,7 +237,6 @@ class KZCenter(object):
 
     def fit(self, guessed_opt, X, sample_weight=None):
         """
-
         :param X:
         :param sample_weight:
         :return:
@@ -227,9 +248,15 @@ class KZCenter(object):
         if self.is_mapper:
             self.results_ = self.pre_clustering(guessed_opt)
         elif self.is_reducer:
-            self.results_ = kzcenter_charikar(X, sample_weight=sample_weight, guessed_opt=guessed_opt,
-                                              n_clusters=self.n_clusters, n_outliers=self.n_outliers,
-                                              dist_oracle=self.dist_oracle)
+            if self.n_clusters * np.log10(self.n_samples_) < 5:
+                self.results_ = kzcenter_brute(X, sample_weight,
+                                               n_clusters=self.n_clusters,
+                                               n_outliers=self.n_outliers)
+            else:
+                self.results_ = kzcenter_charikar(X, sample_weight=sample_weight, guessed_opt=guessed_opt,
+                                                  n_clusters=self.n_clusters, n_outliers=self.n_outliers,
+                                                  dist_oracle=self.dist_oracle)
+
         else:
             raise AttributeError(
                 "Unclear role: not sure whether current object is a mapper or a reducer.\n"
@@ -241,8 +268,8 @@ class KZCenter(object):
 
     def pre_clustering(self, guessed_opt):
         """
-
-        :param guessed_opt:
+        Greedily cover the data set with ball of specified size
+        :param guessed_opt: the radius of the ball used for compressing the data set
         :return results: list of (array, int)
             List of (ball center, #points in the ball)
         """
@@ -277,7 +304,7 @@ class KZCenter(object):
 def kzcenter_charikar(X, sample_weight=None, guessed_opt=None, n_clusters=7, n_outliers=0, delta=0.05,
                       dist_oracle=None):
     """
-
+    Implementation of the algorithm proposed in Moses Charikar's SODA'01 paper
     :param X:
     :param sample_weight:
     :param guessed_opt:
@@ -332,4 +359,43 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None, n_clusters=7, n_o
 
 
 def kzcenter_brute(X, sample_weight=None, n_clusters=7, n_outliers=0):
-    pass
+    """
+    Solve the (k,z)-center problem using brute-force
+    :param X:
+    :param sample_weight:
+    :param n_clusters:
+    :param n_outliers:
+    :return: list of tuple of (array, int)
+        List of (ball center, #points in the ball)
+    """
+    from itertools import combinations
+    n_distinct_points, _ = X.shape
+    if sample_weight is None:
+        sample_weight = np.ones(n_distinct_points)
+    n_samples = sum(sample_weight)
+
+    if n_distinct_points <= n_clusters:
+        return [(c, w) for c, w in zip(X, sample_weight)]
+
+    costs = []
+    # enumerate all possible k centers
+    for sol in combinations(range(n_distinct_points), n_clusters):
+        idx = list(sol)  # because sol is a tuple
+        cs = X[list(idx)]
+        dists = [np.min(np.linalg.norm(x - cs, axis=1)) for x in X]
+        sorted_dist_idxs = np.argsort(dists)
+        can_remove = 0
+        farthest = 0
+
+        # count how many weights can be removed
+        while farthest < len(dists) and can_remove <= n_outliers:
+            can_remove += sample_weight[sorted_dist_idxs[farthest]]
+            farthest += 1
+
+        costs.append((idx, dists[sorted_dist_idxs[farthest - 1]]))
+
+    opt_centers, cost = min(costs, key=lambda c: c[1])
+    opt_centers = X[opt_centers]
+    n_covered = np.unique([np.argmin(np.linalg.norm(x - opt_centers, axis=1)) for x in X],
+                          return_counts=True)
+    return list(zip(opt_centers, n_covered[1]))

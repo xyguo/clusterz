@@ -6,6 +6,10 @@ def gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
                      means=None, covar=None, outliers_dist_factor=50,
                      random_state=None):
     """
+    gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
+                     means=None, covar=None, outliers_dist_factor=50,
+                     random_state=None)
+
     generate data according to gaussian mixture model
     :param n_samples:
     :param n_clusters:
@@ -48,7 +52,18 @@ def gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
 
 
 def add_outliers(X, n_outliers, dist_factor=10, random_state=None):
-    """given data set data, add some outliers to it"""
+    """
+    add_outliers(X, n_outliers, dist_factor=10, random_state=None)
+
+    add outliers to given data set.
+
+    :param X:
+    :param n_outliers:
+    :param dist_factor: int,
+        affects how far away the outliers distributed
+    :param random_state:
+    :return:
+    """
     np.random.seed(random_state)
     n_samples, n_features = X.shape
     assert n_outliers < n_samples
