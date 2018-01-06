@@ -51,26 +51,30 @@ def gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
     return X
 
 
-def add_outliers(X, n_outliers, dist_factor=10, random_state=None):
+def add_outliers(X, n_outliers, dist_factor=10, random_state=None, return_index=False):
     """
     add_outliers(X, n_outliers, dist_factor=10, random_state=None)
 
-    add outliers to given data set.
+    add outliers to given data set: add large random shifts to some of the data in X
 
-    :param X:
+    :param X: array of shape=(n_samples, n_features)
     :param n_outliers:
     :param dist_factor: int,
         affects how far away the outliers distributed
     :param random_state:
-    :return:
+    :param return_index: bool, whether to return
+    :return X or (X, outliers):
+        X: array of shape=(n_samples, n_features);
+        outliers: array of shape=(n_outliers,), indices of outlier points in the returned data set.
     """
     np.random.seed(random_state)
     n_samples, n_features = X.shape
     assert n_outliers < n_samples
     shift = max(np.mean(np.linalg.norm(X, axis=1)), 1.0)
-    outliers = np.random.choice(n_samples, n_outliers, replace=False)
+    outlier_idxs = np.random.choice(n_samples, n_outliers, replace=False)
     outliers_shift = np.random.multivariate_normal(np.zeros(n_features),
                                                    np.identity(n_features) * dist_factor * shift,
                                                    n_outliers)
-    X[outliers] += outliers_shift
-    return X
+    outliers = X[outlier_idxs] + outliers_shift
+    X = np.vstack((X, outliers))
+    return (X, outlier_idxs) if return_index else X

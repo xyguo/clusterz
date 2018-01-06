@@ -24,7 +24,7 @@ Xs = evenly_partition(X, n_machines)
 
 
 # real data set
-realworld = False
+realworld = True
 if realworld:
     X, y = load_digits(return_X_y=True)
     n_machines = 3
@@ -32,8 +32,8 @@ if realworld:
     n_samples, n_features = X.shape
     n_outliers = n_samples // 5
     epsilon = 0.1
-    X = add_outliers(X, n_outliers, dist_factor=50)
-    Xs = evenly_partition(X, n_machines)
+    X = add_outliers(X, n_outliers, dist_factor=50, random_state=random_state)
+    Xs = evenly_partition(X, n_machines, random_state=random_state)
 
 learner = DistributedKZCenter(n_machines=n_machines, n_clusters=n_clusters,
                               n_outliers=n_outliers, epsilon=epsilon, debug=True)
@@ -44,5 +44,5 @@ t_elapsed = time() - t_start
 
 print("estimated OPT cost: {}".format(learner.opt_))
 print("SOL cost: {}".format(learner.cost(X)))
-print("outliers' cost in SOL: {}".format(learner.cost(X, consider_outliers=False)))
+print("outliers' cost in SOL: {}".format(learner.cost(X, remove_outliers=False)))
 print("Time used: {}s".format(t_elapsed))

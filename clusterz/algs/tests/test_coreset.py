@@ -1,4 +1,7 @@
 import unittest
+from ..coreset import Coreset, DistributedCoreset
+from sklearn.cluster import KMeans
+from sklearn.datasets import load_iris
 
 
 class MyTestCase(unittest.TestCase):

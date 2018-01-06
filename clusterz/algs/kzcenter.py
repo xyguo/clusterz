@@ -9,7 +9,8 @@ import warnings
 import numpy as np
 
 from sklearn.exceptions import NotFittedError
-from .misc import DistQueryOracle
+from sklearn.utils import check_array
+from .misc import DistQueryOracle, distributedly_estimate_diameter
 from ..utils import debug_print
 
 
@@ -48,7 +49,7 @@ class DistributedKZCenter(object):
         self.random_state = random_state
         self.debugging = debug
 
-        self.fitted_centers_ = None
+        self.cluster_centers_ = None
         self.n_samples_, self.n_features_ = None, None
         self.opt_ = None
 
@@ -62,10 +63,11 @@ class DistributedKZCenter(object):
         :return: float,
             actual cost
         """
-        if self.fitted_centers_ is None:
+        if self.cluster_centers_ is None:
             raise NotFittedError("Model hasn't been fitted yet\n")
-        dists = [np.min(np.linalg.norm(x - self.fitted_centers_, axis=1))
-                 for x in X]
+        X = check_array(X, ensure_2d=True)
+        dists = np.fromiter((np.min(np.linalg.norm(x - self.cluster_centers_, axis=1))
+                             for x in X), dtype=np.float64, count=X.shape[0])
         dists.sort()
         if remove_outliers:
             return dists[-int((1+self.epsilon) * self.n_outliers + 1)]
@@ -109,20 +111,21 @@ class DistributedKZCenter(object):
         # if the number of allowed outliers are more than n_samples then we
         # simply choose arbitrary n_clusters points in the data set as centers
         if self.n_samples_ <= (1 + self.epsilon) * self.n_outliers:
-            while len(self.fitted_centers_) < min(self.n_clusters, self.n_samples_):
+            while len(self.cluster_centers_) < min(self.n_clusters, self.n_samples_):
                 for X in Xs:
                     for i in range(min(X.shape[0], self.n_clusters)):
-                        self.fitted_centers_.append(X[i])
+                        self.cluster_centers_.append(X[i])
             return self
 
         # estimating the optimal radius using binary search
-        debug_print("Start guessing optimal radius ...", debug=self.debugging)
         n_guesses = 1  # used for debugging
         total_iters_at_most = self.n_clusters * self.n_machines * (1 + 1 / self.epsilon)
         total_covered_at_least = max(self.n_samples_ - (1+self.epsilon) * self.n_outliers, 1)
         lb = 0
         # upper bound is initialized as the sum of diameters across all machines
-        ub = sum(oc.estimate_diameter(n_estimation=10)[1] for oc in oracles)
+        _, ub = distributedly_estimate_diameter(Xs, n_estimation=10)
+        debug_print("Start guessing optimal radius in [{},{}]...".format(lb, ub),
+                    debug=self.debugging)
         guessed_opt = (lb + ub) / 2
         while ub > (1+self.delta) * lb and ub > 1e-3:
             debug_print("{}-th guess: trying with OPT = {}".format(n_guesses, guessed_opt), debug=self.debugging)
@@ -149,7 +152,7 @@ class DistributedKZCenter(object):
         debug_print("Aggregate results on reducer ...", debug=self.debugging)
         for i, m in enumerate(mappers):
             m.fit(guessed_opt, Xs[i], sample_weights[i])
-        X = np.vstack([m.fitted_centers for m in mappers])
+        X = np.vstack([m.cluster_centers for m in mappers])
         sample_weight = np.hstack([m.clusters_size for m in mappers])
 
         debug_print("Fit the aggregated data set ...", debug=self.debugging)
@@ -160,7 +163,7 @@ class DistributedKZCenter(object):
                            oracle=DistQueryOracle(tree_algorithm='ball_tree'))
         reducer.fit(5 * ub, X, sample_weight)
 
-        self.fitted_centers_ = list(reducer.fitted_centers)
+        self.cluster_centers_ = list(reducer.cluster_centers)
 
         return self
 
@@ -210,7 +213,7 @@ class KZCenter(object):
         self.n_iters_ = None
         self.n_covered_ = None
         self.results_ = None
-        self.fitted_centers_ = None
+        self.cluster_centers_ = None
         self.clusters_size_ = None
         self.n_samples_ = None
         self.n_features_ = None
@@ -228,8 +231,8 @@ class KZCenter(object):
         return self.results_
 
     @property
-    def fitted_centers(self):
-        return self.fitted_centers_
+    def cluster_centers(self):
+        return self.cluster_centers_
 
     @property
     def n_iters(self):
@@ -248,7 +251,9 @@ class KZCenter(object):
         if self.is_mapper:
             self.results_ = self.pre_clustering(guessed_opt)
         elif self.is_reducer:
-            if self.n_clusters * np.log10(self.n_samples_) < 5:
+            # if n^k / k! < 10^5
+            if self.n_clusters * np.log10(self.n_samples_) - \
+                    np.sum(np.log10(np.arange(1, self.n_clusters + 1))) < 6:
                 self.results_ = kzcenter_brute(X, sample_weight,
                                                n_clusters=self.n_clusters,
                                                n_outliers=self.n_outliers)
@@ -261,7 +266,7 @@ class KZCenter(object):
             raise AttributeError(
                 "Unclear role: not sure whether current object is a mapper or a reducer.\n"
             )
-        self.fitted_centers_ = np.array([c for c, _ in self.results_])
+        self.cluster_centers_ = np.array([c for c, _ in self.results_])
         self.clusters_size_ = np.array([w for _, w in self.results_])
         self.n_covered_ = sum(self.clusters_size_)
         return self
@@ -382,7 +387,9 @@ def kzcenter_brute(X, sample_weight=None, n_clusters=7, n_outliers=0):
     for sol in combinations(range(n_distinct_points), n_clusters):
         idx = list(sol)  # because sol is a tuple
         cs = X[list(idx)]
-        dists = [np.min(np.linalg.norm(x - cs, axis=1)) for x in X]
+        dists = np.fromiter((np.min(np.linalg.norm(x - cs, axis=1)) for x in X),
+                            dtype=np.float64,
+                            count=X.shape[0])
         sorted_dist_idxs = np.argsort(dists)
         can_remove = 0
         farthest = 0
@@ -399,3 +406,7 @@ def kzcenter_brute(X, sample_weight=None, n_clusters=7, n_outliers=0):
     n_covered = np.unique([np.argmin(np.linalg.norm(x - opt_centers, axis=1)) for x in X],
                           return_counts=True)
     return list(zip(opt_centers, n_covered[1]))
+
+
+class DistributedKCenter(object):
+    pass

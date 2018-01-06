@@ -1,8 +1,92 @@
 import warnings
 import numpy as np
+from scipy.spatial.distance import pdist
 from sklearn.neighbors import KDTree, BallTree, LSHForest
 from sklearn.exceptions import NotFittedError
 from sklearn.utils import check_array
+
+
+def _brute_force_ball(X, centers, radius, count_only=False):
+    """
+    :param X: array of shape=(n_samples, n_features),
+        data set
+    :param centers: array of shape=(n_centers, n_features),
+        centers being queried
+    :param radius: float
+    :param count_only: bool
+    :return: list of arrays
+        list of data idxs
+    """
+    centers = check_array(centers, ensure_2d=True)
+    if count_only:
+        return list(np.sum(np.linalg.norm(X - c, axis=1) <= radius)
+                    for c in centers)
+    else:
+        return list(np.where(np.linalg.norm(X - c, axis=1) <= radius)[0]
+                    for c in centers)
+
+
+def farthest_neighbor(c, X, return_distance=True):
+    """
+    Time complexity: O(n_samples * n_features)
+    :param c: the queried point
+    :param X: the data set
+    :param return_distance:
+    :return (dist, idx) or (idx): (float, int) or int
+        return the index of the point in X that is farthest to c, if return_distance is True,
+        also return the correponding distance
+    """
+    X = check_array(X, ensure_2d=True)
+    dists = np.linalg.norm(X - c, axis=1)
+    farthest = np.argmax(dists)
+    return (dists[farthest], farthest) if return_distance else farthest
+
+
+def estimate_diameter(X, n_estimation=1, metric='minkowski'):
+    """
+    Pick an arbitrary point in the data set, suppose d is the largest distance between this
+    point and any other points, then the diameter must be in [d, 2d]
+
+    Time complexity: O(n_samples * n_estimations * n_features)
+    :param X: array of shape=(n_samples, n_features),
+        data set
+    :param n_estimation: number of sampled estimation points
+    :param metric: {'minkowski'}
+    :return: (lower_bound, upper_bound)
+    """
+    X = check_array(X, ensure_2d=True)
+    if metric == 'minkowski':
+        n_samples, _ = X.shape
+        estimations = [0] + list(np.random.choice(range(1, n_samples),
+                                                  min(n_estimation - 1, n_samples - 1),
+                                                  replace=False))
+        lb = min(farthest_neighbor(X[i], X, return_distance=True)[0] for i in estimations)
+        diam = (lb, 2 * lb)
+    else:
+        raise ValueError("metric `{}` currently not supported\n".format(metric))
+    return diam
+
+
+def distributedly_estimate_diameter(Xs, n_estimation=10):
+    """
+    Estimate diameter for distributed data set
+    :param Xs: list of arrays, each array represents a subset of data partitioned on some machine
+    :param n_estimation: number of estimation point
+    :return (lb, ub): lower bound and upper bound of the diameter
+    """
+    n_machines = len(Xs)
+
+    # sample base points
+    machines = np.random.choice(n_machines, n_estimation, replace=True)
+    base_points = []
+    for m in machines:
+        idx = np.random.randint(0, Xs[m].shape[0])
+        base_points.append(Xs[m][idx])
+
+    lower_bounds = []
+    for bp in base_points:
+        lower_bounds.append(max(farthest_neighbor(bp, X, return_distance=True)[0] for X in Xs))
+    return max(lower_bounds), min(map(lambda x: 2 * x, lower_bounds))
 
 
 class DistQueryOracle(object):
@@ -10,6 +94,7 @@ class DistQueryOracle(object):
     def __init__(self,
                  tree_algorithm='auto', leaf_size=30,
                  metric='minkowski',
+                 precompute_distances='auto',
                  # below are parameters for LSHForest specifically
                  n_estimators=10,
                  radius=1.0, n_candidates=50, n_neighbors=5,
@@ -24,6 +109,13 @@ class DistQueryOracle(object):
 
         :param metric: string, default 'minkowski'
             the distance metric to use in the tree
+
+        :param precompute_distances: {'auto', True, False}
+            Precompute distances (faster but takes more memory).
+            'auto': do not precompute distances if n_samples^2  > 12 million.
+            This corresponds to about 100MB overhead per job using double precision.
+            True: always precompute distances
+            False: never precompute distances
 
         Below are parameters specifically for LSHForest
 
@@ -54,6 +146,8 @@ class DistQueryOracle(object):
         self.tree_algorithm = tree_algorithm
         self.leaf_size = leaf_size
         self.metric = metric
+        # TODO: add pre-computed distance matrix
+        self.precompute_distances = precompute_distances
 
         # For LSHForest
         self.n_estimators = n_estimators
@@ -274,7 +368,7 @@ class DistQueryOracle(object):
 
         return self.fitted_data_[densest_idx], self.ball_cache_[densest_idx]
 
-    def estimate_diameter(self, n_estimation=None):
+    def estimate_diameter(self, n_estimation=1):
         """
         Pick an arbitrary point in the data set, suppose d is the largest distance between this
         point and any other points, then the diameter must be in [d, 2d]
@@ -289,19 +383,10 @@ class DistQueryOracle(object):
         if self.diam_ is not None:
             return self.diam_
 
-        if self.metric is 'minkowski':
-            if n_estimation is None:
-                lb, _ = self.farthest_neighbor(self.fitted_data_[0], return_distance=True)
-            else:
-                n_samples, _ = self.fitted_data_.shape
-                estimations = [0] + list(np.random.choice(np.arange(1, n_samples),
-                                                          min(n_estimation - 1, n_samples - 1),
-                                                          replace=False))
-                lb = min(self.farthest_neighbor(self.fitted_data_[i], return_distance=True)[0]
-                         for i in estimations)
-            self.diam_ = (lb, 2 * lb)
-        else:
-            raise ValueError("metric `{}` currently not supported\n".format(self.metric))
+        self.diam_ = estimate_diameter(X=self.fitted_data_,
+                                       n_estimation=n_estimation,
+                                       metric=self.metric)
+
         return self.diam_
 
     def farthest_neighbor(self, x, return_distance=True):
@@ -314,9 +399,7 @@ class DistQueryOracle(object):
         """
         if not self.is_fitted:
             raise NotFittedError("Tree hasn't been fitted yet\n")
-        dists = np.linalg.norm(self.fitted_data_ - x, axis=1)
-        farthest = np.argmax(dists)
-        return (dists[farthest], farthest) if return_distance else farthest
+        return farthest_neighbor(x, X=self.fitted_data_, return_distance=return_distance)
 
     def kneighbors(self, centers, k=1, return_distance=True):
         """
@@ -349,20 +432,3 @@ class DistQueryOracle(object):
         else:
             raise ValueError("Tree algorithm `{}` unknown\n".format(self.tree_algorithm))
 
-
-def _brute_force_ball(X, centers, radius, count_only=False):
-    """
-
-    :param centers: array of centers queried
-    :param radius:
-    :param count_only:
-    :return: list of arrays
-        list of data idxs
-    """
-    centers = check_array(centers, ensure_2d=True)
-    if count_only:
-        return list(np.sum(np.linalg.norm(X - c, axis=1) <= radius)
-                    for c in centers)
-    else:
-        return list(np.where(np.linalg.norm(X - c, axis=1) <= radius)[0]
-                    for c in centers)
