@@ -178,7 +178,7 @@ class DistributedKZLpClustering(object):
         guessed_radius = self.estimate_opt_radius_range_(Xs, opt_radius_lb, opt_radius_ub)
 
         debug_print("Start sampling coreset for a range of guessed optimal radius in [{},{}] ({} guesses)...".
-                    format(opt_radius_lb, opt_radius_ub, len(guessed_radius)),
+                    format(guessed_radius[0], guessed_radius[-1], len(guessed_radius)),
                     debug=self.debugging)
         coresets = self.coresets_collector_(Xs, guessed_radius)
 
@@ -196,7 +196,7 @@ class DistributedKZLpClustering(object):
             opt_radius_lb = 1
         # upper bound is initialized as the sum of diameters across all machines
         if not opt_radius_ub or opt_radius_ub == np.inf:
-            _, opt_radius_ub = distributedly_estimate_diameter(Xs, n_estimation=10)
+            _, opt_radius_ub = distributedly_estimate_diameter(Xs, n_estimation=1)
 
         n_radius_tried = int(np.log(opt_radius_ub / opt_radius_lb) / np.log(1 + self.epsilon))
         guessed_radius = [(opt_radius_lb * ((1 + self.epsilon) ** i)) ** self.p
@@ -233,7 +233,7 @@ class DistributedKZLpClustering(object):
         # actual data size. The size is determined such that in the robust_kzmedian step the total number
         # of clients is no more than n_samples / 10
         coreset_size = (self.n_clusters * self.n_features_ + np.log(1 / self.delta)) / (self.epsilon ** 2)
-        coreset_size = max(min(coreset_size, self.n_samples_ / (10 * len(guessed_radiuses))), self.n_clusters * 5)
+        coreset_size = max(min(coreset_size, self.n_samples_ / (100 * len(guessed_radiuses))), self.n_clusters * 5)
         debug_print("Coreset size = {}".format(coreset_size), debug=self.debugging)
 
         coresets = []

@@ -95,6 +95,7 @@ def kmeans_(X, sample_weights):
 
 
 class DistributedKMeans(DistributedLpClustering):
+    """Algorithm proposed by Balcan et al. NIPS13"""
 
     def __init__(self,
                  n_clusters=None, n_machines=None,

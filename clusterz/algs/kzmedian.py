@@ -87,7 +87,7 @@ def kmedian_(X, sample_weights):
 
 
 class DistributedKMedian(DistributedLpClustering):
-
+    """Algorithm proposed by Balcan et al. NIPS13"""
     def __init__(self,
                  n_clusters=None, n_machines=None,
                  pre_clustering_routine=None, n_pre_clusters=None,
