@@ -12,14 +12,16 @@ from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argm
 from sklearn.exceptions import NotFittedError
 from sklearn.utils import check_array
 from .misc import DistQueryOracle, distributedly_estimate_diameter, farthest_neighbor
-from ..utils import debug_print
+from ..utils import evenly_partition, debug_print
 
 
 class DistributedKZCenter(object):
 
     def __init__(self, algorithm='multiplicative',
                  n_clusters=None, n_outliers=None, n_machines=None,
-                 epsilon=0.1, delta=0.01, random_state=None, debug=False):
+                 epsilon=0.1, delta=0.01,
+                 machine_multi=False, local_data_size=None,
+                 random_state=None, debug=False):
         """
         Serves as the master node.
 
@@ -65,6 +67,10 @@ class DistributedKZCenter(object):
         self.delta_ = delta
         self.random_state = random_state
         self.debugging = debug
+        self.machine_multi_ = machine_multi
+        self.local_data_size_ = local_data_size
+        if self.machine_multi_ and local_data_size is None:
+            self.local_data_size_ = 10000
 
         self.cluster_centers_ = None
         self.n_samples_, self.n_features_ = None, None
@@ -96,7 +102,22 @@ class DistributedKZCenter(object):
         else:
             return dists[-(int((1 + self.epsilon_) * self.n_outliers_) + 1)]
 
-    def fit(self, Xs, sample_weights=None):
+    def machine_multiplication_(self, Xs, shuffle=False):
+        """make super machines"""
+        if not self.machine_multi_:
+            raise AttributeError("Machine multiplication hasn't been enabled.\n")
+        multiplied_Xs = []
+
+        for i, X in enumerate(Xs):
+            if X.shape[0] > self.local_data_size_:
+                multi = int(np.ceil(X.shape[0] / self.local_data_size_))
+                multi_X = evenly_partition(X, n_machines=multi, shuffle=shuffle)
+                multiplied_Xs += multi_X
+            else:
+                multiplied_Xs.append(X)
+        return multiplied_Xs
+
+    def fit(self, Xs, sample_weights=None, dist_oracles=None):
         """
 
         :param Xs: list of arrays of shape=(n_samples_i, n_features),
@@ -104,53 +125,59 @@ class DistributedKZCenter(object):
             that has been partitioned onto one machine.
         :param sample_weights: list of arrays of shape=(n_samples_i,),
             sample weights for each machine's data
+        :param dist_oracles: list of distance oracles,
+            If not provided then the class will create oracles by its own
         :return self:
         """
         self.n_machines_ = len(Xs)
         self.n_samples_ = sum(X.shape[0] for X in Xs)
         self.n_features_ = Xs[0].shape[1]
 
-        return self.available_algorithms_[self.algorithm](Xs, sample_weights)
+        return self.available_algorithms_[self.algorithm](Xs, sample_weights, dist_oracles)
 
-    def fit_auto_(self, Xs, sample_weights=None):
+    def fit_auto_(self, Xs, sample_weights=None, dist_oracles=None):
         if self.n_outliers_ > self.epsilon_ * self.n_samples_:
-            return self.fit_icml2018_additive_(Xs, sample_weights)
+            return self.fit_icml2018_additive_(Xs, sample_weights, dist_oracles)
         else:
-            return self.fit_icml2018_multiplicative_(Xs, sample_weights)
+            return self.fit_icml2018_multiplicative_(Xs, sample_weights, dist_oracles)
 
-    def fit_randomly_(self, Xs, sample_weights=None):
+    def fit_randomly_(self, Xs, sample_weights=None, dist_oracles=None):
         """Baseline method: randomly select k+z points from each machine,
         then randomly choose k points as final cluster centers from the m(k+z) sampled points.
         """
         aggregated_samples = [np.random.choice(X.shape[0], size=self.n_clusters_ + self.n_outliers_, replace=False)
                               for X in Xs]
         aggregated_samples = np.vstack(X[aggregated_samples[i]] for i, X in enumerate(Xs))
+        assert aggregated_samples.shape[0] <= self.n_machines_ * (self.n_clusters_ + self.n_outliers_)
+        assert aggregated_samples.shape[1] == self.n_features_
 
         final_samples = np.random.choice(aggregated_samples.shape[0],
                                          size=self.n_clusters_, replace=False)
         final_samples = aggregated_samples[final_samples]
         self.cluster_centers_ = final_samples
-        self.communication_cost_ = self.n_machines_ * (self.n_clusters_ + self.n_outliers_) * self.n_features_
+        self.communication_cost_ = aggregated_samples.shape[0] * aggregated_samples.shape[1]
 
         return self
 
-    def fit_charikar_(self, Xs, sample_weights=None):
+    def fit_charikar_(self, Xs, sample_weights=None, dist_oracles=None):
         """Baseline method: randomly select k+z points from each machine,
         then run Charikar's method on these m(k+z) sampled points.
         """
         aggregated_samples = [np.random.choice(X.shape[0], size=self.n_clusters_ + self.n_outliers_, replace=False)
                               for X in Xs]
         aggregated_samples = np.vstack(X[aggregated_samples[i]] for i, X in enumerate(Xs))
+        assert aggregated_samples.shape[0] <= self.n_machines_ * (self.n_clusters_ + self.n_outliers_)
+        assert aggregated_samples.shape[1] == self.n_features_
 
         results = kzcenter_charikar(aggregated_samples, sample_weight=None, guessed_opt=None,
                                     n_clusters=self.n_clusters_, n_outliers=self.n_outliers_,
                                     dist_oracle=DistQueryOracle(tree_algorithm='ball_tree'),
                                     densest_ball_radius=1, removed_ball_radius=3)
         self.cluster_centers_ = np.array([c for c, _ in results])
-        self.communication_cost_ = self.n_machines_ * (self.n_clusters_ + self.n_outliers_) * self.n_features_
+        self.communication_cost_ = aggregated_samples.shape[0] * aggregated_samples.shape[1]
         return self
 
-    def fit_moseley_(self, Xs, sample_weights=None):
+    def fit_moseley_(self, Xs, sample_weights=None, dist_oracles=None):
         """
         implementation for our Moseley's NIPS2015 paper
         """
@@ -164,25 +191,32 @@ class DistributedKZCenter(object):
         # if the number of allowed outliers are more than n_samples then we
         # simply choose arbitrary n_clusters points in the data set as centers
         if self.n_samples_ <= (1 + self.epsilon_) * self.n_outliers_:
+            self.cluster_centers_ = []
             while len(self.cluster_centers_) < min(self.n_clusters_, self.n_samples_):
                 for X in Xs:
                     for i in range(min(X.shape[0], self.n_clusters_)):
                         self.cluster_centers_.append(X[i])
+            self.cluster_centers_ = np.array(self.cluster_centers_)
             return self
 
         debug_print("Fit each machine's local data ...", debug=self.debugging)
         mappers = []
         for i in range(self.n_machines_):
+            debug_print("\tFit {}th machine's local data ...".format(i), debug=self.debugging)
             mappers.append(KZCenter(algorithm='greedy',
                                     n_clusters=self.n_clusters_ + self.n_outliers_,
                                     n_outliers=0,
                                     n_machines=self.n_machines_, epsilon=self.epsilon_)
-                           .fit(X=Xs[i], sample_weight=sample_weights[i], guessed_opt=None))
+                           .fit(X=Xs[i], sample_weight=sample_weights[i],
+                                dist_oracle=None,
+                                guessed_opt=None))
 
         # construct the centralized data set
         debug_print("Aggregate results on reducer ...", debug=self.debugging)
         X = np.vstack([m.cluster_centers for m in mappers])
         sample_weight = np.hstack([m.clusters_size for m in mappers])
+        assert X.shape[0] <= self.n_machines_ * (self.n_clusters_ + self.n_outliers_)
+        assert X.shape[1] == self.n_features_
 
         debug_print("Fit the aggregated data set with shape={}...".format(X.shape), debug=self.debugging)
         results = kzcenter_charikar(X, sample_weight=sample_weight, guessed_opt=None,
@@ -190,10 +224,10 @@ class DistributedKZCenter(object):
                                     dist_oracle=DistQueryOracle(tree_algorithm='ball_tree'),
                                     densest_ball_radius=5, removed_ball_radius=11)
         self.cluster_centers_ = np.array([c for c, _ in results])
-        self.communication_cost_ = self.n_machines_ * (self.n_clusters_ + self.n_outliers_) * self.n_features_
+        self.communication_cost_ = X.shape[0] * X.shape[1]
         return self
 
-    def fit_icml2018_additive_(self, Xs, sample_weights=None):
+    def fit_icml2018_additive_(self, Xs, sample_weights=None, dist_oracles=None):
         """
         implementation for the `distr-kz-ctl-additive` method in our ICML2018 paper
         """
@@ -211,7 +245,9 @@ class DistributedKZCenter(object):
         n_final_samples_ = (self.n_clusters_ * self.n_features_ * np.log(1 / self.delta_)) / (self.epsilon_ ** 2)
         n_final_samples_ = n_final_samples_ * np.log(n_final_samples_)
         n_final_samples_ = max(self.n_machines_ * self.n_clusters_, n_final_samples_)
-        n_final_samples_ = min(self.n_samples_ / 10, n_final_samples_)
+        n_final_samples_ = min(self.n_machines_ * (self.n_clusters_ + self.n_outliers_),
+                               self.n_samples_ / (2 * self.n_machines_),
+                               n_final_samples_)
         n_final_samples_ = int(n_final_samples_)
 
         # determine the final sample size on each machine, i.e. n'_i
@@ -231,47 +267,57 @@ class DistributedKZCenter(object):
 
         debug_print("Fit the aggregated data set with shape {}...".format(final_X.shape), debug=self.debugging)
         reducer = KZCenter(algorithm='charikar', n_clusters=self.n_clusters_, n_outliers=n_final_outliers_,
-                           n_machines=self.n_machines_, random_state=self.random_state,
-                           oracle=DistQueryOracle(tree_algorithm='ball_tree'))
-        reducer.fit(X=final_X, sample_weight=None, guessed_opt=None)
+                           n_machines=self.n_machines_, random_state=self.random_state)
+        reducer.fit(X=final_X, sample_weight=None,
+                    dist_oracle=DistQueryOracle(tree_algorithm='ball_tree'), guessed_opt=None)
 
-        self.cluster_centers_ = list(reducer.cluster_centers)
-        self.communication_cost_ = np.sum(samples_sizes_for_each_machine) * self.n_features_
+        self.cluster_centers_ = np.atleast_2d(reducer.cluster_centers)
+        self.communication_cost_ = final_X.shape[0] * final_X.shape[1]
 
         return self
 
-    def fit_icml2018_multiplicative_(self, Xs, sample_weights=None):
+    def fit_icml2018_multiplicative_(self, Xs, sample_weights=None, dist_oracles=None):
         """
         implementation for the `distr-kz-ctl-multiplicaive` method in our ICML2018 paper
         """
-        if sample_weights is None:
+        if self.machine_multi_:
+            debug_print("Machine multiplication ...", debug=self.debugging)
+            Xs = self.machine_multiplication_(Xs)
+            if sample_weights:
+                sample_weights = self.machine_multiplication_(sample_weights)
+            debug_print("\t got {} machines...".format(len(Xs)), debug=self.debugging)
+        self.n_machines_ = len(Xs)
+        if not sample_weights:
             sample_weights = [None] * len(Xs)
 
-        self.n_machines_ = len(Xs)
-
         debug_print("Build distance query oracle ...", debug=self.debugging)
-        oracles = []
-        for i in range(self.n_machines_):
-            oracles.append(DistQueryOracle(tree_algorithm='auto',
-                                           leaf_size=min(Xs[i].shape[0] // self.n_clusters_, 60))
-                           .fit(Xs[i]))
+        if dist_oracles is not None and len(dist_oracles) == self.n_machines_:
+            oracles = dist_oracles
+        else:
+            oracles = []
+            for i in range(self.n_machines_):
+                oracles.append(DistQueryOracle(tree_algorithm='auto',
+                                               leaf_size=min(Xs[i].shape[0] // self.n_clusters_, 60))
+                               .fit(Xs[i]))
 
         debug_print("Initialize mappers ...", debug=self.debugging)
         mappers = []
         for i in range(self.n_machines_):
             mappers.append(
                 KZCenter(algorithm='greedy_covering', n_clusters=self.n_clusters_, n_outliers=self.n_outliers_,
-                         n_machines=self.n_machines_, epsilon=self.epsilon_, oracle=oracles[i], debug=self.debugging))
+                         n_machines=self.n_machines_, epsilon=self.epsilon_, debug=self.debugging))
 
         self.n_samples_ = sum(X.shape[0] for X in Xs)
         self.n_features_ = Xs[0].shape[1]
         # if the number of allowed outliers are more than n_samples then we
         # simply choose arbitrary n_clusters points in the data set as centers
         if self.n_samples_ <= (1 + self.epsilon_) * self.n_outliers_:
+            self.cluster_centers_ = []
             while len(self.cluster_centers_) < min(self.n_clusters_, self.n_samples_):
                 for X in Xs:
                     for i in range(min(X.shape[0], self.n_clusters_)):
                         self.cluster_centers_.append(X[i])
+            self.cluster_centers_ = np.array(self.cluster_centers_)
             return self
 
         # estimating the optimal radius using binary search
@@ -284,11 +330,13 @@ class DistributedKZCenter(object):
         debug_print("Start guessing optimal radius in [{},{}]...".format(lb, ub),
                     debug=self.debugging)
         guessed_opt = (lb + ub) / 2
-        while ub > (1+self.delta_) * lb and ub > 1e-3:
+        opt_equal_ub = False
+        while ub > (1 + self.delta_) * lb and ub > 1e-3:
             debug_print("{}-th guess: trying with OPT = {}".format(n_guesses, guessed_opt), debug=self.debugging)
             for i, m in enumerate(mappers):
                 debug_print("\t{}th machine".format(i), debug=self.debugging)
                 m.fit(X=Xs[i], sample_weight=sample_weights[i],
+                      dist_oracle=oracles[i],
                       guessed_opt=guessed_opt)
             total_iters = sum(m.n_iters for m in mappers)
             total_covered = sum(m.n_covered for m in mappers)
@@ -299,6 +347,9 @@ class DistributedKZCenter(object):
                 lb = guessed_opt
             else:
                 ub = guessed_opt
+                if ub <= (1 + self.delta_) * lb or ub <= 1e-3:
+                    opt_equal_ub = True
+                    break
             guessed_opt = (lb + ub) / 2
             n_guesses += 1
 
@@ -309,18 +360,24 @@ class DistributedKZCenter(object):
 
         # construct the centralized data set
         debug_print("Aggregate results on reducer ...", debug=self.debugging)
-        for i, m in enumerate(mappers):
-            m.fit(X=Xs[i], sample_weight=sample_weights[i], guessed_opt=self.opt_)
+        if not opt_equal_ub:
+            for i, m in enumerate(mappers):
+                m.fit(X=Xs[i], sample_weight=sample_weights[i], guessed_opt=self.opt_)
         X = np.vstack([m.cluster_centers for m in mappers])
         sample_weight = np.hstack([m.clusters_size for m in mappers])
+        assert X.shape[0] <= total_iters_at_most
 
+        debug_print("Expected aggregated data size {}, got {}...".format(total_iters_at_most, X.shape),
+                    debug=self.debugging)
         debug_print("Fit the aggregated data set with shape {}...".format(X.shape), debug=self.debugging)
         reducer = KZCenter(algorithm='charikar', n_clusters=self.n_clusters_,
                            n_outliers=(1 + self.epsilon_) * self.n_outliers_, n_machines=self.n_machines_,
-                           random_state=self.random_state, oracle=DistQueryOracle(tree_algorithm='ball_tree'))
-        reducer.fit(X=X, sample_weight=sample_weight, guessed_opt=5 * ub)
+                           random_state=self.random_state)
+        reducer.fit(X=X, sample_weight=sample_weight,
+                    dist_oracle=DistQueryOracle(tree_algorithm='ball_tree'),
+                    guessed_opt=5 * ub)
 
-        self.cluster_centers_ = list(reducer.cluster_centers)
+        self.cluster_centers_ = np.atleast_2d(reducer.cluster_centers)
         self.communication_cost_ = X.shape[0] * self.n_features_
 
         return self
@@ -329,7 +386,7 @@ class DistributedKZCenter(object):
 class KZCenter(object):
 
     def __init__(self, algorithm='greedy', n_clusters=None, n_outliers=None, n_machines=None, epsilon=0.1,
-                 random_state=None, oracle=None, debug=False):
+                 random_state=None, debug=False):
         """
         Worker object on single machine. Can conduct pre-clustering or regular
         clustering tasks.
@@ -354,8 +411,6 @@ class KZCenter(object):
 
         :param random_state: numpy.RandomState
 
-        :param oracle: DistQueryOracle object,
-            used for distance query
         """
         self.available_algorithms_ = {
             'brute': self.fit_brute_,
@@ -373,7 +428,6 @@ class KZCenter(object):
         self.n_machines_ = n_machines
         self.epsilon_ = epsilon
         self.random_state = random_state
-        self.dist_oracle = oracle
         self.debugging = debug
 
         self.facilities_ = None
@@ -432,46 +486,48 @@ class KZCenter(object):
         else:
             return dists[-(int((1 + self.epsilon_) * self.n_outliers_) + 1)]
 
-    def fit(self, X, sample_weight=None, guessed_opt=None):
+    def fit(self, X, sample_weight=None, dist_oracle=None, guessed_opt=None):
         """
         :param X:
         :param sample_weight:
         :return:
         """
         if self.algorithm not in ['greedy', 'brute']:
-            if not self.dist_oracle:
-                self.dist_oracle = DistQueryOracle(tree_algorithm='auto')
-            if not self.dist_oracle.is_fitted:
-                self.dist_oracle.fit(X, sample_weight)
+            if not dist_oracle:
+                dist_oracle = DistQueryOracle(tree_algorithm='auto')
+            if not dist_oracle.is_fitted:
+                dist_oracle.fit(X, sample_weight)
 
         self.n_samples_, self.n_features_ = X.shape
-        self.results_ = self.available_algorithms_[self.algorithm](X, sample_weight, guessed_opt)
+        self.results_ = self.available_algorithms_[self.algorithm](X, sample_weight,
+                                                                   dist_oracle=dist_oracle,
+                                                                   guessed_opt=guessed_opt)
 
         self.cluster_centers_ = np.array([c for c, _ in self.results_])
         self.clusters_size_ = np.array([w for _, w in self.results_])
         self.n_covered_ = sum(self.clusters_size_)
         return self
 
-    def fit_greedy_(self, X, sample_weight=None, guessed_opt=None):
+    def fit_greedy_(self, X, sample_weight=None, dist_oracle=None, guessed_opt=None):
         centers = kcenter_greedy(X, n_clusters=self.n_clusters_)
         closest_center, _ = pairwise_distances_argmin_min(X, centers)
         cs, counts = np.unique(closest_center, return_counts=True)
         results = [(centers[cs[i]], wc) for i, wc in enumerate(counts)]
         return results
 
-    def fit_charikar_(self, X, sample_weight=None, guessed_opt=None):
+    def fit_charikar_(self, X, sample_weight=None, dist_oracle=None, guessed_opt=None):
         results = kzcenter_charikar(X, sample_weight=sample_weight, guessed_opt=guessed_opt,
                                     n_clusters=self.n_clusters_, n_outliers=self.n_outliers_,
-                                    dist_oracle=self.dist_oracle)
+                                    dist_oracle=dist_oracle)
         return results
 
-    def fit_brute_(self, X, sample_weight=None, guessed_opt=None):
+    def fit_brute_(self, X, sample_weight=None, dist_oracle=None, guessed_opt=None):
         results = kzcenter_brute(X, sample_weight,
                                  n_clusters=self.n_clusters_,
                                  n_outliers=self.n_outliers_)
         return results
 
-    def fit_greedy_covering_(self, X, sample_weight=None, guessed_opt=None):
+    def fit_greedy_covering_(self, X, sample_weight=None, dist_oracle=None, guessed_opt=None):
         """
         Greedily cover the data set with ball of specified size
         :param guessed_opt: the radius of the ball used for compressing the data set
@@ -488,15 +544,15 @@ class KZCenter(object):
                     debug=self.debugging)
         while len(removed) < self.n_samples_ and self.n_iters_ <= n_iters_upperbound:
             # p, covered_pts = self.dist_oracle.densest_ball(2 * guessed_opt)
-            p, covered_pts = self.dist_oracle.densest_ball_faster_but_dirty(2 * guessed_opt,
-                                                                            changed=to_be_updated,
-                                                                            except_for=removed)
+            p, covered_pts = dist_oracle.densest_ball_faster_but_dirty(2 * guessed_opt,
+                                                                       changed=to_be_updated,
+                                                                       except_for=removed)
 
             if p is None:
                 break
             if len(covered_pts) < threshold:
                 break
-            to_be_removed = self.dist_oracle.ball(p.reshape(1, -1), 4 * guessed_opt)[0]
+            to_be_removed = dist_oracle.ball(p.reshape(1, -1), 4 * guessed_opt)[0]
             removed.update(to_be_removed)
             w_p = len(covered_pts)
             results.append((p, w_p))
@@ -506,12 +562,12 @@ class KZCenter(object):
 
             # after removing ball(p, 4L), only the densest ball whose centers resides
             # in ball(p, 6L) \ ball(p, 4L) is affected. So we only need to consider
-            to_be_updated = set(self.dist_oracle.ball(p.reshape(1, -1), 6 * guessed_opt)[0])
+            to_be_updated = set(dist_oracle.ball(p.reshape(1, -1), 6 * guessed_opt)[0])
             to_be_updated.difference_update(removed)
 
         return results
 
-    def fit_greedy_covering_2_(self, X, sample_weight=None,
+    def fit_greedy_covering_2_(self, X, sample_weight=None, dist_oracle=None,
                                guessed_opt=None, reinitialize=False):
         """
         Greedily cover the data set with ball of specified size
@@ -546,17 +602,17 @@ class KZCenter(object):
                     debug=self.debugging)
         while len(removed) < self.n_samples_ and self.n_iters_ <= n_iters_upperbound:
             # p, covered_pts = self.dist_oracle.densest_ball(2 * guessed_opt)
-            p, covered_pts = self.dist_oracle.dense_ball_(2 * guessed_opt,
-                                                          changed=to_be_updated,
-                                                          facility_idxs=self.facility_idxs_,
-                                                          except_for=removed,
-                                                          minimum_density=threshold)
+            p, covered_pts = dist_oracle.dense_ball_(2 * guessed_opt,
+                                                     changed=to_be_updated,
+                                                     facility_idxs=self.facility_idxs_,
+                                                     except_for=removed,
+                                                     minimum_density=threshold)
 
             if p is None:
                 break
             if len(covered_pts) < threshold:
                 break
-            to_be_removed = self.dist_oracle.ball(p.reshape(1, -1), 4 * guessed_opt)[0]
+            to_be_removed = dist_oracle.ball(p.reshape(1, -1), 4 * guessed_opt)[0]
             to_be_removed = set(to_be_removed).difference(removed)
             removed.update(to_be_removed)
             w_p = len(to_be_removed)
@@ -567,7 +623,7 @@ class KZCenter(object):
 
             # after removing ball(p, 4L), only the densest ball whose centers resides
             # in ball(p, 6L) \ ball(p, 4L) is affected. So we only need to consider
-            to_be_updated = set(self.dist_oracle.ball(p.reshape(1, -1), 6 * guessed_opt)[0]).\
+            to_be_updated = set(dist_oracle.ball(p.reshape(1, -1), 6 * guessed_opt)[0]). \
                 intersection(self.facility_idxs_)
             to_be_updated.difference_update(removed)
 
@@ -614,6 +670,7 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
 
     n_samples = sum(sample_weight)
     if n_distinct_points <= n_clusters:
+        warnings.warn("Number of total distinct data points is smaller than required number of clusters.")
         return [(c, w) for c, w in zip(X, sample_weight)]
 
     # estimate the upperbound and lowerbound of opt for the data set
@@ -627,7 +684,10 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
 
     results = []
     facility_idxs = np.arange(n_distinct_points)
-    while ub > (1+delta) * lb:
+    n_facilities = len(facility_idxs)
+    n_facilities_thresh = 1e4
+
+    while ub > (1 + delta) * lb:
         removed = set()
         results = []
 
@@ -635,13 +695,17 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
         for i in range(n_clusters):
             if len(removed) == n_distinct_points:
                 break
-            # p, covered_pts = dist_oracle.dense_ball_(densest_ball_radius * guessed_opt,
-            #                                          changed=to_be_updated,
-            #                                          facility_idxs=facility_idxs,
-            #                                          except_for=removed,
-            #                                          minimum_density=np.inf)
+            # When the number of available facilities is huge, use the dense_ball_ method that
+            # has caching and early-returning
+            if n_facilities > n_facilities_thresh:
+                p, covered_pts = dist_oracle.dense_ball_(densest_ball_radius * guessed_opt,
+                                                         changed=to_be_updated,
+                                                         facility_idxs=facility_idxs,
+                                                         except_for=removed,
+                                                         minimum_density=np.inf)
+            else:
+                p, covered_pts = dist_oracle.densest_ball(densest_ball_radius * guessed_opt, removed)
 
-            p, covered_pts = dist_oracle.densest_ball(densest_ball_radius * guessed_opt, removed)
             to_be_removed = dist_oracle.ball(p.reshape(1, -1), removed_ball_radius * guessed_opt)[0]
             to_be_removed = set(to_be_removed).difference(removed)
             to_be_removed = np.array(list(to_be_removed))
@@ -651,10 +715,11 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
 
             # after removing ball(p, aL), only the densest ball whose centers resides
             # in ball(p, (a+b)L) \ ball(p, aL) is affected. So we only need to consider
-            # to_be_updated = set(dist_oracle.ball(p.reshape(1, -1),
-            #                                      (densest_ball_radius + removed_ball_radius) * guessed_opt)[0]). \
-            #     intersection(facility_idxs)
-            # to_be_updated.difference_update(removed)
+            if n_facilities > n_facilities_thresh:
+                to_be_updated = set(dist_oracle.ball(p.reshape(1, -1),
+                                                     (densest_ball_radius + removed_ball_radius) * guessed_opt)[0]). \
+                    intersection(facility_idxs)
+                to_be_updated.difference_update(removed)
 
         n_covered = sum(wp for _, wp in results)
         if n_covered >= n_samples - n_outliers:
@@ -663,6 +728,21 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
         else:
             lb = guessed_opt
             guessed_opt = (guessed_opt + ub) / 2
+
+    # if the program finishes before finding k'<k centers, we use the FarthestNeighbor
+    # method to produce the remained k-k' centers
+    if len(results) < n_clusters:
+        centers = [c for c, _ in results]
+        _, dists_to_centers = pairwise_distances_argmin_min(X, np.atleast_2d(centers))
+
+        for i in range(0, n_clusters - len(results)):
+            next_idx = np.argmax(dists_to_centers)
+            centers.append(X[next_idx])
+            # TODO: here the new center's weight is set to its own weight, this is problematic
+            results.append((X[next_idx], sample_weight[next_idx]))
+            _, next_dist = pairwise_distances_argmin_min(X, np.atleast_2d(centers[-1]))
+            dists_to_centers = np.minimum(dists_to_centers, next_dist)
+
     return results
 
 
@@ -737,7 +817,7 @@ def kcenter_greedy(X, n_clusters=7, random_state=None,
     # indices of points that are selected as centers
     center_idxs = [np.random.randint(0, n_samples)]
     # the distance between each data point to the center set
-    dists_to_centers = pairwise_distances(X, X[center_idxs[-1]].reshape(1,-1))
+    dists_to_centers = pairwise_distances(X, X[center_idxs[-1]].reshape(1, -1))
 
     for i in range(1, n_clusters):
         next_idx = np.argmax(dists_to_centers)
@@ -760,4 +840,3 @@ def kcenter_greedy(X, n_clusters=7, random_state=None,
         return tuple(results)
     else:
         return X[center_idxs]
-
