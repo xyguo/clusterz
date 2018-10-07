@@ -10,9 +10,11 @@ Distributed k-Means and k-Median Clustering on General Topologies. NIPS'13
 #         Shi Li          shil@buffalo.edu
 
 import warnings
+import random
 import numpy as np
 
 from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
 from .misc import DistQueryOracle
 from ..utils import debug_print
 
@@ -38,7 +40,7 @@ class DistributedCoreset(object):
         :param kwargs:
             additional arguments for the pre-clustering method
         """
-        self.samples_size = sample_size
+        self.sample_size = sample_size
         self.cost_func = cost_func
         self.n_pre_clusters = n_pre_clusters
         self.pre_clustering_method = pre_clustering_method
@@ -76,7 +78,7 @@ class DistributedCoreset(object):
         :return self:
         """
         self.n_machines = len(Xs)
-        actual_coreset_size = max(self.n_machines, self.samples_size - self.n_pre_clusters * self.n_machines)
+        actual_coreset_size = max(self.n_machines, self.sample_size - self.n_pre_clusters * self.n_machines)
 
         if (pre_clusters or pre_clustering_costs) and not pre_cluster_centers:
             raise ValueError("You can't provide pre_clusters or pre_clustering_costs"
@@ -165,7 +167,7 @@ class Coreset(object):
             by default, the weight of each point in the coreset is 1 / sample_prob, but user can
             multiply it with some normalization number
         """
-        self.samples_size = sample_size
+        self.sample_size = sample_size
         self.cost_func = cost_func
         self.weight_normalizer = weight_normalizer
         self.samples_ = None
@@ -201,7 +203,7 @@ class Coreset(object):
         sampling_prob = sensitivity / self.total_sensitivity_
 
         indices = np.arange(n_samples)
-        coreset_idxs = np.random.choice(indices, size=self.samples_size, replace=False,
+        coreset_idxs = np.random.choice(indices, size=self.sample_size, replace=True,
                                         p=sampling_prob)
         self.samples_ = X[coreset_idxs]
         self.weights_ = self.weight_normalizer / sampling_prob
@@ -211,3 +213,202 @@ class Coreset(object):
         return self
 
 
+class DistributedSummary(object):
+    """
+    J. Chen, E. S. Azer, Q. Zhang,
+    A Practical Algorithm for Distributed Clustering and Outlier Detection,
+    NIPS'18
+    """
+    def __init__(self, n_clusters, n_outliers, alpha, beta,
+                 augmented=False, adversary=False, debug=False):
+        """
+        Distributed driver of Algorithm 1: Summary-Outliers
+        :param n_clusters:
+        :param n_outliers:
+        :param alpha: parameter, determine the sample size
+        :param beta: parameter, determine the ball radius
+        :param debug: debugging flag
+        """
+        self.n_clusters_ = n_clusters
+        self.n_outliers_ = n_outliers
+        self.alpha_ = alpha
+        self.beta_ = min(beta, 1.0)
+        self.samples_ = None
+        self.weights_ = None
+        self.sample_indices_ = None
+        self.augmented_ = augmented
+        self.adversary_ = adversary
+        self.n_outliers_per_machine_ = None
+
+        self.n_machines_ = None
+        self.debugging = debug
+        self.samples_ = None
+        self.weights_ = None
+        self.sample_indices_ = None
+
+    @property
+    def samples(self):
+        return self.samples_
+
+    @property
+    def weights(self):
+        return self.weights_
+
+    @property
+    def sample_indices(self):
+        return self.sample_indices_
+
+    def fit(self, Xs):
+        """
+
+        :param Xs: list of arrays of shape=(n_samples_i, n_features),
+            Divided data set. Each array in the list represents a bunch of data
+            that has been partitioned onto one machine.
+        :return self:
+        """
+        self.n_machines_ = len(Xs)
+        mappers = []
+        all_samples, all_weights, all_indices = [],[], []
+        self.n_outliers_per_machine_ = self.n_outliers_ if self.adversary_ else 2 * self.n_outliers_ // self.n_machines_
+
+        for X in Xs:
+            m = SummaryOutliers(n_clusters=self.n_clusters_,
+                                           n_outliers=self.n_outliers_per_machine_,
+                                           alpha=self.alpha_,
+                                           beta=self.beta_,
+                                           augmented=self.augmented_)
+            m.fit(X)
+            all_samples.append(m.samples)
+            all_weights.append(m.weights)
+            mappers.append(m)
+
+        self.samples_ = np.vstack(all_samples)
+        self.weights_ = np.hstack(all_weights)
+
+        self.sample_indices_ = [list(map(lambda x: (i, x), mappers[i].sample_indices))
+                                for i in range(self.n_machines_)]
+        return self
+
+
+class SummaryOutliers(object):
+
+    def __init__(self, n_clusters, n_outliers, alpha, beta,
+                 augmented=False):
+        """
+        Algorithm 1: Summary-Outliers
+        :param n_clusters:
+        :param n_outliers:
+        :param alpha: parameter, determine the sample size
+        :param beta: parameter, determine the ball radius
+        """
+        self.n_clusters_ = n_clusters
+        self.n_outliers_ = n_outliers
+        self.alpha_ = alpha
+        self.beta_ = min(beta, 1.0)
+        self.samples_ = None
+        self.weights_ = None
+        self.sample_indices_ = None
+        self.augmented_ = augmented
+
+    @property
+    def samples(self):
+        return self.samples_
+
+    @property
+    def weights(self):
+        return self.weights_
+
+    @property
+    def sample_indices(self):
+        return self.sample_indices_
+
+    def fit(self, X):
+        """
+
+        :param X: array of shape=(n_samples, n_features)
+        :return:
+        """
+        n_samples, _ = X.shape
+        i = 0
+        samples_ = []
+        weights_ = []
+        sample_indices_ = []
+        X_i = np.arange(0, n_samples)  # indices for remained data points
+
+        while len(X_i) > max(8 * self.n_outliers_, 0):
+            kappa = max(np.log(len(X_i)), self.n_clusters_)
+            S_i_size = np.int(self.alpha_ * kappa)
+            # 6. construct a set S_i of size \alpha\kappa by random sampling (with replacement) from X_i
+            S_i = np.random.choice(X_i, size=S_i_size, replace=True)
+            S_i = np.unique(S_i)
+            w_i = np.ones((len(S_i),))
+            # 6. for each point in X_i, compute the distance to its nearest point in S_i
+            # each value in nearest would range from 0 to len(S_i)
+            nearest, distance = pairwise_distances_argmin_min(X[X_i], X[S_i])
+            # 8. let rho_i be the smallest radius s.t. |B(S_i, X_i, rho_i)| >= beta|X_i|.
+            rho_i = np.sort(distance)[np.ceil((len(X_i) - 1) * self.beta_)]
+            # Let C_i = B(S_i, X_i, rho_i)
+            # foreach x\in X_i, assign sigma(x)=x
+            # for each x \in X_i, assign weight w_x = |\sigma^{−1}(x)| and add (x, w_x) into Q
+            idxs, counts = np.unique(nearest[distance <= rho_i], return_counts=True)
+            w_i[idxs] = counts
+
+            samples_.append(X[S_i])
+            weights_.append(w_i)
+            sample_indices_.append(S_i)
+
+            # 9. for each x \in C_i, choose the point y \in S_i that minimizes d(x, y) and assign \sigma(x) = y
+            X_i = X_i[distance > rho_i]
+
+        # Augmented-Summary-Outliers (Algorithm 2 in the paper)
+        if self.augmented_:
+            return self.augmenting_(X, X_i,
+                                    np.hstack(sample_indices_))
+
+        # append the remained "outliers"
+        samples_.append(X[X_i])
+        weights_.append(np.ones(len(X_i)))
+        sample_indices_.append(X_i)
+
+        # concatenate all S_i's to build the final summary
+        self.samples_ = np.vstack(samples_)
+        self.weights_ = np.hstack(weights_)
+        self.sample_indices_ = np.hstack(sample_indices_)
+
+        assert len(self.samples_) == len(self.weights_)
+        return self
+
+    def augmenting_(self, X, X_r, S):
+        """
+        Augmented-Summary-Outliers (Algorithm 2 in the paper)
+        :param X: data set, array of shape=(n_samples, n_features)
+        :param X_r: the indices of remained "outliers" after SummaryOutliers
+        :param S: the collected "inliers" after SummaryOutliers
+        :return self:
+        """
+        S_p_size = len(X_r) - len(S)
+        X_idxs_set = set(np.arange(X.shape[0]))
+        X_r_set = set(X_r)
+        S_set = set(S)
+        X_minus_X_r_and_S = list(X_idxs_set.difference(X_r_set.union(S_set)))
+
+        # 2. Sample S' of size |X_r|-|S| from X\(X_r\cup S)
+        S_p = np.random.choice(X_minus_X_r_and_S,
+                               size=S_p_size, replace=True)
+        S_p = np.unique(S_p)
+
+        # 3. construct \pi(x)
+        S_and_S_p = list(S_set.union(S_p))
+        X_minus_X_r = list(X_idxs_set.difference(X_r_set))
+
+        # each value in nearest would range from 0 to len(S_and_S_p)
+        nearest, distance = pairwise_distances_argmin_min(X[X_minus_X_r], X[S_and_S_p])
+
+        # 4. count the weights
+        idxs, weights = np.unique(nearest, return_counts=True)
+
+        self.sample_indices_ = S_and_S_p[idxs]
+        self.weights_ = weights
+        self.samples_ = X[self.sample_indices_]
+
+        return self
