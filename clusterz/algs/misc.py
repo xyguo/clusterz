@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""Miscellaneous helper functions for distance queries"""
+
+# Author: Xiangyu Guo     xiangyug[at]buffalo.edu
+#         Shi Li          shil[at]buffalo.edu
+
 import warnings
 import numpy as np
 from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
@@ -142,7 +148,7 @@ def distributedly_estimate_diameter(Xs, n_estimation=10):
 class DistQueryOracle(object):
 
     def __init__(self,
-                 tree_algorithm='auto', leaf_size=30,
+                 tree_algorithm='auto', leaf_size=60,
                  metric='minkowski',
                  precompute_distances='auto',
                  # below are parameters for LSHForest specifically

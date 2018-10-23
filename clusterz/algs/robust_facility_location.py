@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""robust facility location with outliers"""
+"""robust facility location with outliers
+Based on the following paper:
 
-# Author: Xiangyu Guo     xiangyug@buffalo.edu
-#         Yunus Esencayi  yunusese@buffalo.edu
-#         Shi Li          shil@buffalo.edu
+B. Anthony, V. Goyal, A. Gupta and V. Nagarajan.
+A Plant Location Guide for the Unsure: Approximation Algorithms for Min-Max Location Problems.
+Mathematics of Operations Research, Vol. 35, No. 1 (Feb., 2010), pp. 79-101
+"""
+
+# Author: Xiangyu Guo     xiangyug[at]buffalo.edu
+#         Shi Li          shil[at]buffalo.edu
 
 import numpy as np
 
@@ -15,7 +20,7 @@ from ..utils import debug_print
 
 
 def reverse_greedy_(distances, weights, client_set_residence, client_set_weight,
-                    n_client_sets, n_clusters, B):
+                    n_client_sets, n_clusters, B, debug=False):
     """
     Helper function for robust facility location algorithm. Implement the
     reverse-greedy-and-reweighting process
@@ -46,7 +51,7 @@ def reverse_greedy_(distances, weights, client_set_residence, client_set_weight,
     available = np.ones(n_facilities, dtype=bool)  # record whether a facility has been removed
     affected_clients = np.arange(n_clients)  # cache the indices of centers whose error increase needs update
     affected_facilities = set(range(n_facilities))  # cache the indices of centers whose error increase needs update
-    debug_print("\tCompute solution for B={} ...".format(B), True)
+    debug_print("\tCompute solution for B={} ...".format(B), debug)
     for t in range(n_facilities - n_clusters):
         # update the cache for nearest and second nearest point for each client
         if len(affected_clients) > 0:
@@ -70,7 +75,7 @@ def reverse_greedy_(distances, weights, client_set_residence, client_set_weight,
         can_remove = np.where(np.logical_and(available, np.all(error_increase <= B / 2, axis=1)))[0]
         if len(can_remove) == 0:
             debug_print("\t\tB={0:.3f} is too small, there're still {1} points remained to be removed, skip...".
-                        format(B, n_facilities - n_clusters - t), True)
+                        format(B, n_facilities - n_clusters - t), debug)
             return None
         # find the one with minimum weighted error increase
         vt_idx = np.argmin(error_increase[can_remove].dot(client_set_weight))
@@ -111,7 +116,8 @@ def reverse_greedy_(distances, weights, client_set_residence, client_set_weight,
 
 def robust_facility_location(client_sets, facilities, sample_weights, radiuses,
                              threshold_cost, pairwise_dist,
-                             n_clusters=8, n_outliers=0, return_cost=False):
+                             n_clusters=8, n_outliers=0, return_cost=False,
+                             debug=False):
     """
     solve \min_C \sup_L (cost(X_L, d_L, C) - (1+\epsilon)zL)
 
@@ -140,7 +146,7 @@ def robust_facility_location(client_sets, facilities, sample_weights, radiuses,
     n_client_sets = len(client_sets)
     client_set_weight = np.ones(n_client_sets)
     debug_print("{} client sets with {} clients in total, and {} available facilities, of which {} will be selected ..."
-                .format(n_client_sets, n_clients, n_facilities, n_clusters), True)
+                .format(n_client_sets, n_clients, n_facilities, n_clusters), debug)
 
     # pre-compute distances
     client_set_sizes = [X.shape[0] for X in client_sets]
@@ -165,7 +171,7 @@ def robust_facility_location(client_sets, facilities, sample_weights, radiuses,
     results = []
     lb = 4 * min(radiuses[i] * sample_weights[i][sample_weights[i] > 0].sum() for i in range(n_client_sets))
     ub = 8 * max(radiuses[i] * sample_weights[i][sample_weights[i] > 0].sum() for i in range(n_client_sets))
-    debug_print("\tCompute solution for B in [{},{}] ...".format(lb, ub), True)
+    debug_print("\tCompute solution for B in [{},{}] ...".format(lb, ub), debug)
     B = (lb + ub) / 2
     while ub > 1.01 * lb:
         distances[:] = cached_distances
@@ -185,7 +191,7 @@ def robust_facility_location(client_sets, facilities, sample_weights, radiuses,
                                         sample_weights=sample_weights[i],
                                         n_outliers=n_outliers, L=radiuses[i], element_wise=False)
                          for i in range(n_client_sets))
-        debug_print("\t\tFor B={}, the cost is {}.".format(B, final_cost))
+        debug_print("\t\tFor B={}, the cost is {}.".format(B, final_cost), debug)
         results.append((remained_centers_idxs, final_cost))
 
         ub = B

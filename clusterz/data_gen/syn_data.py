@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+"""Helper functions for creating synthesized data"""
+# Author: Xiangyu Guo     xiangyug[at]buffalo.edu
+#         Shi Li          shil[at]buffalo.edu
+
 import numpy as np
 import scipy as sp
 
@@ -6,10 +11,6 @@ def gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
                      means=None, covar=None, outliers_dist_factor=50,
                      random_state=None):
     """
-    gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
-                     means=None, covar=None, outliers_dist_factor=50,
-                     random_state=None)
-
     generate data according to gaussian mixture model
     :param n_samples:
     :param n_clusters:
@@ -53,9 +54,7 @@ def gaussian_mixture(n_samples, n_clusters, n_outliers, n_features,
 
 def add_outliers(X, n_outliers, dist_factor=10, random_state=None, return_index=False):
     """
-    add_outliers(X, n_outliers, dist_factor=10, random_state=None)
-
-    add outliers to given data set: add large random shifts to some of the data in X
+    add outliers to a given data set: add large random shifts to some of the data in X
 
     :param X: array of shape=(n_samples, n_features)
     :param n_outliers:

@@ -9,15 +9,19 @@ from sklearn.utils import check_array
 from scipy.spatial import ConvexHull
 
 from .kzcenter import kcenter_greedy, kzcenter_charikar, kzcenter_charikar_eg
-from .kzmeans import kmeans_mm_, kzmeans_cost_
-from .kzmedian import kmedian_mm_, kzmedian_cost_
+from .kzmeans import kz_means, kzmeans_cost_
+from .kzmedian import kz_median, kzmedian_cost_
 from .misc import DistQueryOracle
 from .coreset import DistributedSummary
 from ..utils import debug_print
 
 
 class Guha_DistributedKZCenter(object):
-
+    """
+    Sudipto Guha, Yi Li, and Qin Zhang.
+    Distributed partial clustering.
+    In Proceedings of the 29th ACM Symposium on Parallelism in Algorithms and Architectures, SPAA 2017,
+    """
     def __init__(self, return_outliers=False, use_epsilon_net=False,
                  n_clusters=None, n_outliers=None, n_machines=None,
                  epsilon=0.1, rho=2, random_state=None, debug=False):
@@ -464,6 +468,11 @@ class CAZ_DistributedKZClustering(object):
 
         self.summary_ = None
         self.cluster_centers_ = None
+        self.communication_cost_ = None
+
+    @property
+    def communication_cost(self):
+        return self.communication_cost_
 
     def cost(self, X, remove_outliers=True):
         """
@@ -500,6 +509,9 @@ class CAZ_DistributedKZClustering(object):
 
         X_summary = ds.samples
         wt_summary = ds.weights
+        print("Summary size = {}".format(X_summary.shape[0]))
+        self.communication_cost_ = X_summary.shape[0] * X_summary.shape[1]
+        self.communication_cost_ += wt_summary.shape[0]
 
         self.cluster_centers_ = self.central_solver_(X=X_summary, sample_weights=wt_summary,
                                                      n_clusters=self.n_clusters_,
@@ -525,7 +537,7 @@ class CAZ_DistributedKZMeans(CAZ_DistributedKZClustering):
         :param random_state:
         :param debug:
         """
-        super().__init__(central_solver=kmeans_mm_, cost_func=kzmeans_cost_,
+        super().__init__(central_solver=kz_means, cost_func=kzmeans_cost_,
                          n_clusters=n_clusters, n_outliers=n_outliers,
                          n_machines=n_machines, alpha=alpha, beta=beta,
                          random_state=random_state, debug=debug)
@@ -549,7 +561,7 @@ class CAZ_DistributedKZMedian(CAZ_DistributedKZClustering):
         :param random_state:
         :param debug:
         """
-        super().__init__(central_solver=kmedian_mm_, cost_func=kzmedian_cost_,
+        super().__init__(central_solver=kz_median, cost_func=kzmedian_cost_,
                          n_clusters=n_clusters, n_outliers=n_outliers,
                          n_machines=n_machines, alpha=alpha, beta=beta,
                          random_state=random_state, debug=debug)

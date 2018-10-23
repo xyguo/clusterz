@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Algorithm for distributed (k,z)-median"""
+"""
+Algorithm for distributed (k,z)-lp-clustering, including (k,z)-means and (k,z)-median
+"""
 
 # Author: Xiangyu Guo     xiangyug@buffalo.edu
-#         Yunus Esencayi  yunusese@buffalo.edu
 #         Shi Li          shil@buffalo.edu
 
 import numpy as np
@@ -14,7 +15,7 @@ from sklearn.utils import check_array
 from .robust_facility_location import robust_facility_location
 from .misc import distributedly_estimate_diameter
 from .coreset import DistributedCoreset
-from ..utils import debug_print
+from ..utils import debug_print, compute_cost
 
 
 def lp_cost_(p, X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False):
@@ -69,14 +70,15 @@ class DistributedKZLpClustering(object):
                  cost_func=None, pairwise_dist_func=None,
                  n_clusters=None, n_outliers=None, n_machines=None,
                  pre_clustering_routine=None, n_pre_clusters=None,
-                 epsilon=0.1, delta=0.01, random_state=None, debug=False):
+                 epsilon=0.1, delta=0.01, coreset_ratio=10,
+                 random_state=None, debug=False):
         """
         Serves as the master node.
 
         :param p: float between 1 and 2
             The cost(X, C) will be \sum_{x\in X) d(x, C)^p
 
-        :param cost_func: cost_func(X, C, sample_weights=None, n_outliers=0, L=None)
+        :param cost_func: cost_func(X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False)
             return the cost of center set C on data set X with sample_weights, number of outliers n_outliers,
              and threshold distance L.
 
@@ -102,6 +104,9 @@ class DistributedKZLpClustering(object):
         :param delta: float.
             error tolerance parameter for the success probability
 
+        :param coreset_ratio: how large should the coreset be,
+            the sample size will be n_samples / coreset_ratio
+
         :param random_state: numpy.RandomState
 
         :param debug: boolean, whether output debugging information
@@ -114,39 +119,39 @@ class DistributedKZLpClustering(object):
             pairwise_dist_func = lambda X, C: pairwise_lp_dist_(self.p, X, C)
         self.pairwise_dist_func = pairwise_dist_func
 
-        self.n_clusters = n_clusters
-        self.n_outliers = n_outliers
-        self.n_machines = n_machines
-        self.epsilon = epsilon
-        self.delta = delta
+        self.n_clusters_ = n_clusters
+        self.n_outliers_ = n_outliers
+        self.n_machines_ = n_machines
+        self.epsilon_ = epsilon
+        self.delta_ = delta
         self.random_state = random_state
-        self.debugging = debug
+        self.debugging_ = debug
         self.pre_clustering_routine = pre_clustering_routine
         self.n_pre_clusters = n_pre_clusters
 
         self.cluster_centers_ = None
         self.n_samples_, self.n_features_ = None, None
         self.opt_ = None
+        self.communication_cost_ = None
+        self.coreset_ratio_ = coreset_ratio
+
+    @property
+    def communication_cost(self):
+        return self.communication_cost_
 
     def cost(self, X, remove_outliers=True):
         """
 
         :param X: array,
             data set
-        :param remove_outliers: boolean, default True
+        :param remove_outliers: None or int, default None
             whether to remove outliers when computing the cost on X
         :return: float,
             actual cost
         """
-        if self.cluster_centers_ is None:
-            raise NotFittedError("Model hasn't been fitted yet\n")
-        if remove_outliers:
-            cost = self.cost_func(X, self.cluster_centers_,
-                                  n_outliers=int((1+self.epsilon) * self.n_outliers), L=None)
-            return cost
-        else:
-            cost = self.cost_func(X, self.cluster_centers_, n_outliers=0, L=None)
-            return cost
+        return compute_cost(X, cluster_centers=self.cluster_centers_,
+                            cost_func=self.cost_func,
+                            remove_outliers=remove_outliers)
 
     def fit(self, Xs, opt_radius_lb=None, opt_radius_ub=None):
         """
@@ -160,17 +165,19 @@ class DistributedKZLpClustering(object):
             upper bound for the optimal radius
         :return self:
         """
-        self.n_machines = len(Xs)
+        self.n_machines_ = len(Xs)
         self.n_samples_ = sum(X.shape[0] for X in Xs)
         self.n_features_ = Xs[0].shape[1]
-        debug_print("n_samples={}, n_features={}, n_machines={}".format(self.n_samples_, self.n_features_, self.n_machines))
+        debug_print("n_samples={}, n_features={}, n_machines={}".format(self.n_samples_, self.n_features_, self.n_machines_))
 
         # if the number of allowed outliers are more than n_samples then we
         # simply choose arbitrary n_clusters points in the data set as centers
-        if self.n_samples_ <= (1 + self.epsilon) * self.n_outliers:
-            while len(self.cluster_centers_) < min(self.n_clusters, self.n_samples_):
+        if self.n_samples_ <= (1 + self.epsilon_) * self.n_outliers_:
+            if not self.cluster_centers_:
+                self.cluster_centers_ = []
+            while len(self.cluster_centers_) < min(self.n_clusters_, self.n_samples_):
                 for X in Xs:
-                    for i in range(min(X.shape[0], self.n_clusters)):
+                    for i in range(min(X.shape[0], self.n_clusters_)):
                         self.cluster_centers_.append(X[i])
             return self
 
@@ -179,13 +186,16 @@ class DistributedKZLpClustering(object):
 
         debug_print("Start sampling coreset for a range of guessed optimal radius in [{},{}] ({} guesses)...".
                     format(guessed_radius[0], guessed_radius[-1], len(guessed_radius)),
-                    debug=self.debugging)
+                    debug=self.debugging_)
         coresets = self.coresets_collector_(Xs, guessed_radius)
+        self.communication_cost_ = sum(s.shape[0] * s.shape[1] + w.shape[0] + 1
+                                       for s, w, g, _ in coresets)
+        self.communication_cost_ += 2 * len(coresets)  # add the size for coreset indices
 
         # construct the centralized data set and solve for final solution
-        debug_print("Solve the robust k-median problem ...", debug=self.debugging)
+        debug_print("Solve the robust k-median problem ...", debug=self.debugging_)
         self.cluster_centers_ = self.centralized_solver_(coresets, Xs)
-        assert self.cluster_centers_.shape == (self.n_clusters, self.n_features_)
+        # assert self.cluster_centers_.shape == (self.n_clusters_, self.n_features_)
         return self
 
     def estimate_opt_radius_range_(self, Xs, opt_radius_lb=None, opt_radius_ub=None):
@@ -198,8 +208,8 @@ class DistributedKZLpClustering(object):
         if not opt_radius_ub or opt_radius_ub == np.inf:
             _, opt_radius_ub = distributedly_estimate_diameter(Xs, n_estimation=1)
 
-        n_radius_tried = int(np.log(opt_radius_ub / opt_radius_lb) / np.log(1 + self.epsilon))
-        guessed_radius = [(opt_radius_lb * ((1 + self.epsilon) ** i)) ** self.p
+        n_radius_tried = int(np.log(opt_radius_ub / opt_radius_lb) / np.log(1 + self.epsilon_))
+        guessed_radius = [(opt_radius_lb * ((1 + self.epsilon_) ** i)) ** self.p
                           for i in range(n_radius_tried)]
         return guessed_radius
 
@@ -221,8 +231,10 @@ class DistributedKZLpClustering(object):
             (machine_id, sample_id), represents the origin of the corresponding sample
         """
         # construct pre-clusterings as base points for sampling coresets
+        # TODO: allow pre_clustering_routine to handle outliers
         pre_cluster_results = [
-            self.pre_clustering_routine(n_clusters=self.n_pre_clusters).fit(X) for X in Xs
+            self.pre_clustering_routine(n_clusters=self.n_pre_clusters,
+                                        n_outliers=self.n_outliers_ // self.n_machines_).fit(X) for X in Xs
         ]
         pre_cluster_centers = [pr.cluster_centers_ for pr in pre_cluster_results]
         pre_clusters = [pr.predict(X) for pr, X in zip(pre_cluster_results, Xs)]
@@ -232,14 +244,14 @@ class DistributedKZLpClustering(object):
         # This is a hand pick coreset size, which is based on the theoretical results as well as the
         # actual data size. The size is determined such that in the robust_kzmedian step the total number
         # of clients is no more than n_samples / 10
-        coreset_size = (self.n_clusters * self.n_features_ + np.log(1 / self.delta)) / (self.epsilon ** 2)
-        coreset_size = max(min(coreset_size, self.n_samples_ / (100 * len(guessed_radiuses))), self.n_clusters * 5)
-        debug_print("Coreset size = {}".format(coreset_size), debug=self.debugging)
+        coreset_size = (self.n_clusters_ * self.n_features_ + np.log(1 / self.delta_)) / (self.epsilon_ ** 2)
+        coreset_size = max(min(coreset_size, self.n_samples_ / (self.coreset_ratio_ * len(guessed_radiuses))), self.n_clusters_ * 10)
+        debug_print("Coreset size = {}".format(coreset_size), debug=True)
 
         coresets = []
         n_guesses = 1  # used for debugging
         for guessed_opt in guessed_radiuses:
-            debug_print("{}-th guess: trying with optimal radius = {}".format(n_guesses, guessed_opt), debug=self.debugging)
+            debug_print("{}-th guess: trying with optimal radius = {}".format(n_guesses, guessed_opt), debug=self.debugging_)
             n_guesses += 1
 
             # construct coreset w.r.t. the threshold distance d_L
@@ -288,9 +300,10 @@ class DistributedKZLpClustering(object):
                                                    radiuses=final_cost,
                                                    threshold_cost=self.cost_func,
                                                    pairwise_dist=self.pairwise_dist_func,
-                                                   n_clusters=self.n_clusters,
-                                                   n_outliers=(1+self.epsilon) * self.n_outliers,
-                                                   return_cost=False)
+                                                   n_clusters=self.n_clusters_,
+                                                   n_outliers=(1 + self.epsilon_) * self.n_outliers_,
+                                                   return_cost=False,
+                                                   debug=self.debugging_)
         return cluster_centers
 
 
@@ -300,7 +313,7 @@ class DistributedLpClustering(DistributedKZLpClustering):
                  cost_func=None, pairwise_dist_func=None,
                  n_clusters=None, n_machines=None,
                  pre_clustering_routine=None, n_pre_clusters=None,
-                 epsilon=0.1, delta=0.01, random_state=None, debug=False):
+                 epsilon=0.1, delta=0.01, coreset_ratio=10, random_state=None, debug=False):
         """
         Serves as the master node.
 
@@ -310,7 +323,7 @@ class DistributedLpClustering(DistributedKZLpClustering):
         :param local_clustering_method: clustering method
             clustering method used for solving the weighted L_p clustering problem on the coreset
 
-        :param cost_func: cost_func(X, C, sample_weights=None)
+        :param cost_func: cost_func(X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False)
             return the cost of center set C on data set X with sample_weights
 
         :param pairwise_dist_func: pairwise_dist_func(X, C)
@@ -335,24 +348,36 @@ class DistributedLpClustering(DistributedKZLpClustering):
         :param delta: float.
             error tolerance parameter for the success probability
 
+        :param coreset_ratio: how large should the coreset be,
+            the sample size will be n_samples / coreset_ratio
+
         :param random_state: numpy.RandomState
 
         :param debug: boolean, whether output debugging information
         """
         if cost_func:
-            def lp_cost_no_outlier_(X, C, sample_weights=None, n_outliers=0, L=None):
-                return cost_func(X, C, sample_weights=sample_weights)
+            def lp_cost_no_outlier_(X, C, sample_weights=None,
+                                    n_outliers=0, L=None, element_wise=False):
+                return cost_func(X, C, sample_weights=sample_weights,
+                                 n_outliers=0, L=None, element_wise=element_wise)
         else:
-            def lp_cost_no_outlier_(X, C, sample_weights=None, n_outliers=0, L=None):
-                return lp_cost_(p, X, C, sample_weights=sample_weights, n_outliers=0, L=None)
-        cost_func = lp_cost_no_outlier_
+            def lp_cost_no_outlier_(X, C, sample_weights=None,
+                                    n_outliers=0, L=None, element_wise=False):
+                return lp_cost_(p, X, C, sample_weights=sample_weights,
+                                n_outliers=0, L=None, element_wise=element_wise)
+
+        # wrapper for pre-clustering routine:
+        # Here we only use routines that doesn't handle outliers,
+        # but in DistributedKZLpClustering by default pre_clustering routine accepts
+        # a parameter 'n_outliers'
+        pre_clustering_routine_wrapper = lambda n_clusters, n_outliers: pre_clustering_routine(n_clusters=n_clusters)
 
         super().__init__(p=p,
-                         cost_func=cost_func, pairwise_dist_func=pairwise_dist_func,
+                         cost_func=lp_cost_no_outlier_, pairwise_dist_func=pairwise_dist_func,
                          n_clusters=n_clusters, n_outliers=0, n_machines=n_machines,
-                         pre_clustering_routine=pre_clustering_routine,
-                         n_pre_clusters=n_pre_clusters,
-                         epsilon=epsilon, delta=delta, random_state=random_state, debug=debug)
+                         pre_clustering_routine=pre_clustering_routine_wrapper,
+                         n_pre_clusters=n_pre_clusters, epsilon=epsilon, delta=delta,
+                         coreset_ratio=coreset_ratio, random_state=random_state, debug=debug)
         self.local_clustering_method = local_clustering_method
 
     def estimate_opt_radius_range_(self, Xs, opt_radius_lb=None, opt_radius_ub=None):
@@ -360,4 +385,4 @@ class DistributedLpClustering(DistributedKZLpClustering):
 
     def centralized_solver_(self, coresets, Xs):
         final_samples, final_weights, *_ = coresets[0]
-        return self.local_clustering_method(final_samples, final_weights)
+        return self.local_clustering_method(final_samples, final_weights, self.n_clusters_)

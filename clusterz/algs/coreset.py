@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """Algorithm for sampling coreset:
-Based on the following paper
+Based on the following two papers
 M. F. Balcan, S. Ehrlich, Y. Liang.
 Distributed k-Means and k-Median Clustering on General Topologies. NIPS'13
+
+J. Chen, E. S. Azer, Q. Zhang,
+A Practical Algorithm for Distributed Clustering and Outlier Detection, NIPS'18
 """
 
-# Author: Xiangyu Guo     xiangyug@buffalo.edu
-#         Yunus Esencayi  yunusese@buffalo.edu
-#         Shi Li          shil@buffalo.edu
+# Author: Xiangyu Guo     xiangyug[at]buffalo.edu
+#         Shi Li          shil[at]buffalo.edu
 
 import warnings
 import random
@@ -20,6 +22,9 @@ from ..utils import debug_print
 
 
 class DistributedCoreset(object):
+    """M. F. Balcan, S. Ehrlich, Y. Liang.
+    Distributed k-Means and k-Median Clustering on General Topologies. NIPS'13
+    """
     def __init__(self, sample_size, cost_func=None, debug=False,
                  pre_clustering_method=KMeans,
                  n_pre_clusters=None, **kwargs):
@@ -206,7 +211,8 @@ class Coreset(object):
         coreset_idxs = np.random.choice(indices, size=self.sample_size, replace=True,
                                         p=sampling_prob)
         self.samples_ = X[coreset_idxs]
-        self.weights_ = self.weight_normalizer / sampling_prob
+        self.weights_ = np.ones(sampling_prob.shape) * np.inf
+        self.weights_[coreset_idxs] = self.weight_normalizer / sampling_prob[coreset_idxs]
         self.sample_weights_ = self.weights_[coreset_idxs]
         self.sample_indices_ = coreset_idxs
 
@@ -346,7 +352,7 @@ class SummaryOutliers(object):
             # each value in nearest would range from 0 to len(S_i)
             nearest, distance = pairwise_distances_argmin_min(X[X_i], X[S_i])
             # 8. let rho_i be the smallest radius s.t. |B(S_i, X_i, rho_i)| >= beta|X_i|.
-            rho_i = np.sort(distance)[np.ceil((len(X_i) - 1) * self.beta_)]
+            rho_i = np.sort(distance)[np.int(np.ceil((len(X_i) - 1) * self.beta_))]
             # Let C_i = B(S_i, X_i, rho_i)
             # foreach x\in X_i, assign sigma(x)=x
             # for each x \in X_i, assign weight w_x = |\sigma^{−1}(x)| and add (x, w_x) into Q

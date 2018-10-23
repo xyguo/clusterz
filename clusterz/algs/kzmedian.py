@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Algorithm for distributed (k,z)-median"""
+"""Algorithm for distributed and centralized (k,z)-median, k-median"""
 
 # Author: Xiangyu Guo     xiangyug@buffalo.edu
-#         Yunus Esencayi  yunusese@buffalo.edu
 #         Shi Li          shil@buffalo.edu
 
 import numpy as np
 
+from sklearn.preprocessing import normalize
 from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
 from sklearn.utils import check_array
 
 from .kz_lp_clustering import DistributedKZLpClustering, DistributedLpClustering
+from ..utils import compute_cost
 
 
 def kzmedian_cost_(X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False):
@@ -82,25 +83,241 @@ class DistributedKZMedian(DistributedKZLpClustering):
                          epsilon=epsilon, delta=delta, random_state=random_state, debug=debug)
 
 
-def kmedian_(X, sample_weights):
-    pass
+def kmedian_pp_(X, sample_weights, n_clusters):
+    """
+    (weighted) k-median++ initialization
+
+    :param X: array of shape=(n_samples, n_features)
+    :param sample_weights: array of shape=(n_samples,)
+    :param n_clusters:
+    :return centers: array of shape=(n_clusters, n_features)
+    """
+    n_samples, _ = X.shape
+    first_idx = np.random.randint(0, n_samples)
+    centers = [X[first_idx]]
+    for i in range(n_clusters - 1):
+        _, dist = pairwise_distances_argmin_min(X, centers)
+        probs = normalize((dist * sample_weights).reshape(1,-1), norm='l1')[0]
+        next_idx = np.random.choice(n_samples, 1, replace=True, p=probs)[0]
+        centers.append(X[next_idx])
+    return np.array(centers)
 
 
-class DistributedKMedian(DistributedLpClustering):
-    """Algorithm proposed by Balcan et al. NIPS13"""
+def update_clusters_(X, centers, return_dist=False):
+    """
+
+    :param X:
+    :param centers:
+    :param return_dist: whether to return the distances of each point to its nearest center
+    :return clusters: list of arrays, each array consists of the indices
+        for data in the same cluster. If some cluster has size less than 2 then
+        it is ignored.
+
+    """
+    n_centers = len(centers)
+    idxs, dists = pairwise_distances_argmin_min(X, centers)
+    clusters = []
+    for i in range(n_centers):
+        clusters.append(np.where(idxs == i)[0])
+    clusters = [c for c in clusters if len(c) >= 1]
+    return (clusters, dists) if return_dist else clusters
+
+
+def update_centers_(X, sample_weights, clusters, outliers=None):
+    """
+
+    :param X:
+    :param sample_weights:
+    :param clusters:
+    :return centers:
+    """
+    centers = []
+    for c in clusters:
+        if outliers is not None:
+            c = list(set(c).difference(outliers))
+        # find the weighted median
+        sorted_ft_idxs = np.argsort(X[c], axis=0)
+        sorted_sw = sample_weights[c][sorted_ft_idxs]
+        sorted_cum_sw = np.cumsum(sorted_sw, axis=0)
+        wm_idx = np.apply_along_axis(lambda a: a.searchsorted(a[-1]/2),
+                                     axis=0, arr=sorted_cum_sw)
+        centers.append(X[c][sorted_ft_idxs[wm_idx], np.arange(X.shape[1])])
+    return np.array(centers)
+
+
+def kmedian_mm_(X, sample_weights, n_clusters, n_outliers):
+    """
+    Weighted K-Median-- implementation.
+    :param X:
+    :param sample_weights:
+    :param n_clusters:
+    :param n_outliers:
+    :return cluster_centers_:
+    """
+    n_samples, n_features = X.shape
+    # TODO: find a better way to handle negtive weights
+    centers_idxs = np.random.choice(n_samples, n_clusters, replace=False)
+    cluster_centers_ = X[centers_idxs]
+
+    diff = np.inf
+    i = 0
+    while diff > 1e-3:
+        clusters, dists = update_clusters_(X, cluster_centers_, return_dist=True)
+
+        # ignore the outliers when updating centers
+        outliers = np.argsort(dists)[-n_outliers:]
+        new_centers = update_centers_(X, sample_weights, clusters, outliers=outliers)
+        diff = np.linalg.norm(new_centers - cluster_centers_)
+        cluster_centers_ = new_centers
+
+    # if the program finishes before finding k'<k centers, we use the FarthestNeighbor
+    # method to produce the remained k-k' centers
+    if len(cluster_centers_) < n_clusters:
+        centers = [c for c in cluster_centers_]
+        _, dists_to_centers = pairwise_distances_argmin_min(X, np.atleast_2d(centers))
+
+        for i in range(0, n_clusters - len(cluster_centers_)):
+            next_idx = np.argmax(dists_to_centers)
+            centers.append(X[next_idx])
+            _, next_dist = pairwise_distances_argmin_min(X, np.atleast_2d(centers[-1]))
+            dists_to_centers = np.minimum(dists_to_centers, next_dist)
+        cluster_centers_ = np.array(centers)
+
+    return cluster_centers_
+
+
+def kz_median(X, n_clusters, n_outliers, sample_weights=None):
+    """ K-Median-- """
+    n_samples, _ = X.shape
+    if sample_weights is None:
+        sample_weights = np.ones(n_samples)
+    return kmedian_mm_(X=X, sample_weights=sample_weights,
+                       n_clusters=n_clusters, n_outliers=n_outliers)
+
+
+def kmedian_(X, sample_weights, n_clusters, init='kmedian++'):
+    """
+    Weighted K-Means implementation.
+    :param X:
+    :param sample_weights:
+    :param n_clusters:
+    :param init: string in {'random', 'kmeans++'}, default 'kmeans++'
+    :return cluster_centers_:
+    """
+    n_samples, n_features = X.shape
+    # TODO: find a better way to handle negtive weights
+
+    cluster_centers_ = None
+    if init == 'kmedian++':
+        cluster_centers_ = kmedian_pp_(X, np.clip(sample_weights, 0, np.inf), n_clusters)
+    elif init == 'random':
+        centers_idxs = np.random.choice(n_samples, n_clusters, replace=False)
+        cluster_centers_ = X[centers_idxs]
+    elif isinstance(init, np.ndarray):
+        cluster_centers_ = init
+
+    diff = np.inf
+    i = 0
+    while diff > 1e-3:
+        clusters = update_clusters_(X, cluster_centers_)
+        new_centers = update_centers_(X, sample_weights, clusters)
+        diff = np.linalg.norm(new_centers - cluster_centers_)
+        cluster_centers_ = new_centers
+
+    # if the program finishes before finding k'<k centers, we use the FarthestNeighbor
+    # method to produce the remained k-k' centers
+    if len(cluster_centers_) < n_clusters:
+        centers = [c for c in cluster_centers_]
+        _, dists_to_centers = pairwise_distances_argmin_min(X, np.atleast_2d(centers))
+
+        for i in range(0, n_clusters - len(cluster_centers_)):
+            next_idx = np.argmax(dists_to_centers)
+            centers.append(X[next_idx])
+            _, next_dist = pairwise_distances_argmin_min(X, np.atleast_2d(centers[-1]))
+            dists_to_centers = np.minimum(dists_to_centers, next_dist)
+        cluster_centers_ = np.array(centers)
+
+    return cluster_centers_
+
+
+def k_median_my(X, n_clusters, sample_weights=None):
+    """ K-Median"""
+    n_samples, _ = X.shape
+    if sample_weights is None:
+        sample_weights = np.ones(n_samples)
+    return kmedian_(X=X, sample_weights=sample_weights,
+                   n_clusters=n_clusters)
+
+
+def kmedian_cost_no_outlier_(X, C, sample_weights=None,
+                             n_outliers=0, L=None, element_wise=False):
+    return kzmedian_cost_(X, C, sample_weights=sample_weights,
+                          n_outliers=0, L=None, element_wise=element_wise)
+
+
+class KZMedian(object):
+    """ A wrapper for the kz_median function to support sklearn interface """
+    def __init__(self, n_clusters, n_outliers=0):
+        self.n_clusters_ = n_clusters
+        self.n_outliers_ = n_outliers
+        self.cluster_centers_ = None
+
+    def fit(self, X):
+        self.cluster_centers_ = kz_median(X, self.n_clusters_, self.n_outliers_)
+        return self
+
+    def predict(self, X):
+        nearest, _ = pairwise_distances_argmin_min(X, self.cluster_centers_)
+        return nearest
+
+
+class KMedianWrapped(object):
+
+    def __init__(self, n_clusters):
+        self.n_clusters_ = n_clusters
+        self.cluster_centers_ = None
+        self.cost_func_ = kzmedian_cost_
+
+    def cost(self, X, remove_outliers=True):
+        """
+
+        :param X: array,
+            data set
+        :param remove_outliers: None or int, default None
+            whether to remove outliers when computing the cost on X
+        :return: float,
+            actual cost
+        """
+        return compute_cost(X, cluster_centers=self.cluster_centers_,
+                            cost_func=kmedian_cost_no_outlier_,
+                            remove_outliers=remove_outliers)
+
+    def fit(self, X):
+        self.cluster_centers_ = k_median_my(X, self.n_clusters_)
+        return self
+
+    def predict(self, X):
+        nearest, _ = pairwise_distances_argmin_min(X, self.cluster_centers_)
+        return nearest
+
+
+class BEL_DistributedKMedian(DistributedLpClustering):
+    """
+    Maria Florina Balcan, Steven Ehrlich, Yingyu Liang.
+    Distributed k-Means and k-Median Clustering on General Topologies.
+    NIPS'13.
+    """
     def __init__(self,
                  n_clusters=None, n_machines=None,
                  pre_clustering_routine=None, n_pre_clusters=None,
-                 epsilon=0.1, delta=0.01, random_state=None, debug=False):
-        def kmedian_cost_no_outlier_(X, C, sample_weights=None, n_outliers=0, L=None):
-            return kzmedian_cost_(X, C, sample_weights=sample_weights,
-                                  n_outliers=0, L=None)
+                 epsilon=0.1, delta=0.01, coreset_ratio=10,
+                 random_state=None, debug=False):
         super().__init__(p=1, local_clustering_method=kmedian_,
                          cost_func=kmedian_cost_no_outlier_, pairwise_dist_func=None,
                          n_clusters=n_clusters, n_machines=n_machines,
                          pre_clustering_routine=pre_clustering_routine,
                          n_pre_clusters=n_pre_clusters,
-                         epsilon=epsilon, delta=delta,
+                         epsilon=epsilon, delta=delta, coreset_ratio=coreset_ratio,
                          random_state=random_state, debug=debug)
 
 
