@@ -1,7 +1,7 @@
 # Distributed Clustering with Outliers
 This is the experiment code for our paper
 
-> S. Li, X. Guo. Distributed _k_-Clustering for Data with Heavy Noise. _NIPS'18_
+> X. Guo, S. Li. Distributed _k_-Clustering for Data with Heavy Noise. _NIPS'18_
 
 ## Requirement
 * Python >= 3.4
