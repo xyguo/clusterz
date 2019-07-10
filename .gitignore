@@ -98,3 +98,5 @@ ENV/
 # ignore data files under data/
 data/
 .idea/
+*.pdf
+*.npz

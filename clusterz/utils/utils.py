@@ -10,7 +10,7 @@ from sklearn.utils import check_array
 from sklearn.metrics import pairwise_distances_argmin_min
 
 
-def compute_cost(X, cluster_centers, cost_func, remove_outliers=True):
+def compute_cost(X, cluster_centers, cost_func, remove_outliers=None):
     """
     :param X: array,
         data set
