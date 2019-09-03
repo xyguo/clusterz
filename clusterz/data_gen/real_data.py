@@ -4,7 +4,6 @@
 #         Shi Li          shil[at]buffalo.edu
 
 import numpy as np
-import pandas as pd
 from sklearn.datasets import fetch_covtype
 from scipy.io import loadmat
 import os
@@ -77,9 +76,9 @@ def _get_npz_data(name):
 
 
 DATASETS = {
-    'spambase': lambda **kwargs: _get_npz_data(name='spambase.npz', **kwargs),
-    'letter': lambda **kwargs: _get_npz_data(name='letter.npz', **kwargs),
-    'pendigits': lambda **kwargs: _get_npz_data(name='pendigits.npz', **kwargs),
+    'spambase': lambda : _get_npz_data(name='spambase.npz'),
+    'letter': lambda : _get_npz_data(name='letter.npz'),
+    'pendigits': lambda : _get_npz_data(name='pendigits.npz'),
     'parkinsons': _get_parkinsons_data,
     'higgs': _get_higgs_data,
     'gas': _get_gas_data,
@@ -89,14 +88,13 @@ DATASETS = {
 }
 
 
-def get_realworld_data(dataset, **kwargs):
+def get_realworld_data(dataset):
     """
-
-    :param dataset:
-    :param kwargs:
-    :return:
+    :param dataset: str in {'spambase', 'letter', 'pendigits', 'parkinsons', 'higgs', 'gas', 'power',
+        'covertype', 'skin'}, name of the data set
+    :return X: array of shape=(n_samples, n_features)
     """
     if dataset in DATASETS:
-        return DATASETS[dataset](**kwargs)
+        return DATASETS[dataset]()
     else:
         raise NotImplementedError
