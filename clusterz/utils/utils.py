@@ -91,10 +91,10 @@ def measure_method(name, model, data, distributed_data, n_outliers, dist_oracles
     cost_with_outliers = model.cost(data, remove_outliers=0)
     cost_without_outliers = model.cost(data, remove_outliers=n_outliers)
     print("Result for {}:".format(name))
-    print("Communication cost (#points * #features): {0:e}".format(comm_cost))
-    print("SOL cost (remove {0} outliers): {1:e}".
+    print("Communication cost (#points * #features): {0:.3e}".format(comm_cost))
+    print("SOL cost (remove {0} outliers): {1:.3e}".
           format(n_outliers, cost_without_outliers))
-    print("SOL cost (with all outliers): {0:e}".
+    print("SOL cost (with all outliers): {0:.3e}".
           format(cost_with_outliers))
     print("Time used: {}s".format(t_elapsed))
 
