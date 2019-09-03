@@ -7,17 +7,17 @@
 import warnings
 import numpy as np
 from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
-from sklearn.neighbors import KDTree, BallTree, LSHForest
+from sklearn.neighbors import KDTree, BallTree
 from sklearn.exceptions import NotFittedError
 from sklearn.utils import check_array
 
 
 def _brute_force_knn(X, centers, k, return_distance=True):
     """
-    :param X:
-    :param centers:
-    :param k:
-    :param return_distance:
+    :param X: array of shape=(n_samples, n_features)
+    :param centers: array of shape=(n_centers, n_features)
+    :param k: int, only looking for the nearest k points to each center.
+    :param return_distance: bool, if True the return the distance along with the points
     :return:
     """
     if k == 1:
@@ -32,13 +32,17 @@ def _brute_force_knn(X, centers, k, return_distance=True):
 def _brute_force_ball_within_dataset(X, center_idxs, radius,
                                      sorted_distances, sorted_idxs,
                                      count_only=False):
-    """
+    """Find the points in X that are within given distance `radius` to some centers, here the centers must be within X
+    and are specified by `center_idxs`. Also allows for expoliting auxiliary information if available: specifically,
+    if the distance of each point in X to the centers are already calculated out and sorted.
     :param X: array of shape=(n_samples, n_features),
         data set
     :param centers: array of shape=(n_centers, n_features),
         centers being queried
-    :param radius: float
-    :param count_only: bool
+    :param radius: float, only count points within distance `radius` to its nearest center
+    :param sorted_distances: array of shape=(n_samples,), a sorted array of each point's distance to its nearest center
+    :param sorted_idxs: array of shape=(n_samples,), index of each point after it's sorted
+    :param count_only: bool, if True then return only the number of points in each ball centered at the centers.
     :return: list of arrays
         list of data idxs
     """
@@ -59,13 +63,13 @@ def _brute_force_ball_within_dataset(X, center_idxs, radius,
 
 
 def _brute_force_ball(X, centers, radius, count_only=False):
-    """
+    """Find the points in X that are within given distance `radius` to the `centers`
     :param X: array of shape=(n_samples, n_features),
         data set
     :param centers: array of shape=(n_centers, n_features),
         centers being queried
-    :param radius: float
-    :param count_only: bool
+    :param radius: float, the queried distance
+    :param count_only: bool, if True then only return the number of points
     :return: list of arrays
         list of data idxs
     """
@@ -73,19 +77,15 @@ def _brute_force_ball(X, centers, radius, count_only=False):
     dists = pairwise_distances(centers, X)
     if count_only:
         return list(np.sum(dists <= radius, axis=1))
-        # return list(np.sum(np.linalg.norm(X - c, axis=1) <= radius)
-        #             for c in centers)
     else:
         return list(np.where(d <= radius)[0] for d in dists)
-        # return list(np.where(np.linalg.norm(X - c, axis=1) <= radius)[0]
-        #             for c in centers)
 
 
 def farthest_neighbor(c, X, return_distance=True):
-    """
+    """Find the farthest point in X from c
     Time complexity: O(n_samples * n_features)
-    :param c: the queried point(s)
-    :param X: the data set
+    :param c: array of shape=(n_features,) of (n_queries, n_features), the queried point(s)
+    :param X: array of shape=(n_samples, n_features), the data set
     :param return_distance:
     :return (dist, idx) or (idx): (float, int) or int
         return the index of the point in X that is farthest to c, if return_distance is True,
@@ -147,14 +147,8 @@ def distributedly_estimate_diameter(Xs, n_estimation=10):
 
 class DistQueryOracle(object):
 
-    def __init__(self,
-                 tree_algorithm='auto', leaf_size=60,
-                 metric='minkowski',
-                 precompute_distances='auto',
-                 # below are parameters for LSHForest specifically
-                 n_estimators=10,
-                 radius=1.0, n_candidates=50, n_neighbors=5,
-                 min_hash_match=4, radius_cutoff_ratio=0.9,
+    def __init__(self, tree_algorithm='auto', leaf_size=60,
+                 metric='minkowski', precompute_distances='auto',
                  random_state=None):
         """
         :param tree_algorithm: string in {'auto', 'kd_tree', 'ball_tree', 'brute', 'lsh'}
@@ -173,27 +167,6 @@ class DistQueryOracle(object):
             True: always precompute distances
             False: never precompute distances
 
-        Below are parameters specifically for LSHForest
-
-        :param n_estimators : int (default = 10)
-            Number of trees in the LSH Forest.
-        :param min_hash_match : int (default = 4)
-            lowest hash length to be searched when candidate
-            selection is performed for nearest neighbors.
-        :param n_candidates : int (default = 10)
-            Minimum number of candidates evaluated per estimator,
-            assuming enough items meet the min_hash_match constraint.
-        :param n_neighbors : int (default = 5)
-            Number of neighbors to be returned from query function
-            when it is not provided to the kneighbors method.
-        :param radius : float, optinal (default = 1.0)
-            Radius from the data point to its neighbors. This is the
-            parameter space to use by default for the :meth`radius_neighbors` queries.
-        :param radius_cutoff_ratio : float, optional (default = 0.9)
-            A value ranges from 0 to 1. Radius neighbors will be searched
-            until the ratio between total neighbors within the radius and
-            the total candidates becomes less than this value unless it is
-            terminated by hash length reaching min_hash_match.
         :param random_state : int, RandomState instance or None, optional (default=None)
             If int, random_state is the seed used by the random number generator;
             If RandomState instance, random_state is the random number generator;
@@ -204,15 +177,7 @@ class DistQueryOracle(object):
         self.metric = metric
         # TODO: add pre-computed distance matrix
         self.precompute_distances = precompute_distances
-
-        # For LSHForest
-        self.n_estimators = n_estimators
-        self.radius = radius
-        self.n_candidates = n_candidates
-        self.n_neighbors = n_neighbors,
-        self.min_hash_match = min_hash_match
-        self.radius_cutoff_ratio = radius_cutoff_ratio
-        self.random_state = random_state
+        self.random_state_ = random_state
 
         self.nn_tree_ = None
         self.ball_oracle_ = None
@@ -278,18 +243,6 @@ class DistQueryOracle(object):
             self.ball_oracle_ = lambda cs, r: self.nn_tree_.query_radius(cs, r, return_distance=False)
             self.knn_oracle_ = lambda cs, k, rd: self.nn_tree_.query(cs, k, return_distance=rd)
 
-        elif self.tree_algorithm == 'lsh':
-            self.nn_tree_ = LSHForest(n_estimators=self.n_estimators,
-                                      radius=self.radius,
-                                      n_candidates=self.n_candidates,
-                                      n_neighbors=self.n_neighbors,
-                                      min_hash_match=self.min_hash_match,
-                                      radius_cutoff_ratio=self.radius_cutoff_ratio,
-                                      random_state=self.random_state)
-            self.nn_tree_.fit(X)
-            self.ball_oracle_ = lambda cs, r: self.nn_tree_.radius_neighbors(cs, r, return_distance=False)
-            self.knn_oracle_ = lambda cs, k, rd: self.nn_tree_.kneighbors(cs, k, return_distance=rd)
-
         elif self.tree_algorithm == 'brute':
             self.sorted_distance_cache_, self.sorted_dist_idxs_ = self.precompute_distances_matrix_(X)
             self.ball_oracle_ = lambda cs, r: _brute_force_ball(X, cs, r)
@@ -325,10 +278,9 @@ class DistQueryOracle(object):
             return None, None
 
     def ball(self, centers, radius):
-        """
-        Query the data points in X that are within distance radius to centers
-        :param centers: queried points
-        :param radius: radius of the ball
+        """Query the data points in X that are within distance `radius` to `centers`
+        :param centers: array of shape=(n_points, n_features), queried centers
+        :param radius: float, radius of the ball
         :return: an array of array,
             indices for each center in centers
         """
@@ -339,9 +291,8 @@ class DistQueryOracle(object):
         return self.ball_oracle_(centers, radius)
 
     def densest_ball(self, radius, except_for=None):
-        """
-
-        :param radius:
+        """Find the ball of given radius that covers the most data points
+        :param radius: float, radius of the ball
         :param except_for: iterable or set,
             indices of points that should not be considered
         :return (densest_center, densest_ball): (array of shape=(n_features,), array of shape=(n_covered,)
@@ -378,9 +329,8 @@ class DistQueryOracle(object):
         return densest_center, densest_ball
 
     def brute_force_densest_ball(self, radius, except_for=None, within_idx=None, return_idx=False):
-        """
-        method specifically optimized for brute force ball query
-        :param radius:
+        """Method specifically optimized for brute force ball query
+        :param radius: float, radius of the ball
         :param except_for: iterable or set,
             indices of points that should not be considered
         :param within_idx:
@@ -502,10 +452,6 @@ class DistQueryOracle(object):
             return (None, None, None) if return_idx else (None, None)
 
         for i in remained:
-        # for i in self.facility_idxs_:
-        #     if i in except_for:
-        #         continue
-
             # because ball_cache can become inconsistent due to early returning
             if self.ball_size_cache_[i] is None:
                 ball_i = set(self.ball_oracle_(self.fitted_data_[i].reshape(1, -1), radius)[0])
@@ -554,7 +500,7 @@ class DistQueryOracle(object):
             (densest_center, densest_ball): (array of shape=(n_features,), array of shape=(n_covered,)
                 the center of the densest ball as well as the index of points the ball covers:
         """
-        # TODO: what is the actual complexity of radius_query for BallTree, KDTree, or LSHForest?
+        # TODO: what is the actual complexity of radius_query for BallTree and KDTree?
         # They said that if I can run fast enough, sadness wouldn't catch me up.
 
         if self.ball_radius_cache_ != radius:
@@ -661,7 +607,7 @@ class DistQueryOracle(object):
         return self.diam_
 
     def farthest_neighbor(self, x, return_distance=True):
-        """
+        """Find the farthest point away from x
 
         Time complexity: O(n_samples * n_features)
         :param x:
@@ -673,7 +619,7 @@ class DistQueryOracle(object):
         return farthest_neighbor(x, X=self.fitted_data_, return_distance=return_distance)
 
     def kneighbors(self, centers, k=1, return_distance=True):
-        """
+        """return the k nearest neighbors to centers
 
         Time complexity: depends on the tree alg used
             brute - O(n_samples * n_features)
@@ -683,12 +629,11 @@ class DistQueryOracle(object):
             lsh - o(n_samples * n_features)
         :param centers: array of shape=(n_queries, n_features)
         :param k: queried number of nearest neighbors
-        :param return_distance: default True
+        :param return_distance: default True, whether to return the distance of the neighbors to its nearest centers
         :return: idxs or (dists, idxs)
             idx - the indices of the nearest neighbor in the fitted data set
             dists - the corresponding distance of nearest neighbors
         """
-        warnings.warn("This method is deprecated.", DeprecationWarning)
         if not self.is_fitted:
             raise NotFittedError("Tree hasn't been fitted yet\n")
 
