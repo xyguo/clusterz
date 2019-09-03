@@ -149,6 +149,8 @@ class DistributedKZLpClustering(object):
         :return: float,
             actual cost
         """
+        if self.cluster_centers_ is None:
+            raise NotFittedError("Model has not been fitted.")
         return compute_cost(X, cluster_centers=self.cluster_centers_,
                             cost_func=self.cost_func,
                             remove_outliers=remove_outliers)

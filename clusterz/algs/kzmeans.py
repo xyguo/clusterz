@@ -4,16 +4,11 @@
 # Author: Xiangyu Guo     xiangyug@buffalo.edu
 #         Shi Li          shil@buffalo.edu
 
-import warnings
 import numpy as np
 
-import numpy as np
-
-# from sklearn.cluster import KMeans
 from sklearn.preprocessing import normalize
 from sklearn.metrics.pairwise import euclidean_distances, pairwise_distances_argmin_min
 from sklearn.utils import check_array
-from sklearn.exceptions import NotFittedError
 
 from .kz_lp_clustering import DistributedKZLpClustering, DistributedLpClustering
 from ..utils import compute_cost
@@ -21,11 +16,11 @@ from ..utils import compute_cost
 
 def kzmeans_cost_(X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False):
     """
-    :param X: array of shape=(n_samples, n_features)
-    :param C: array of shape=(n_centers, n_features)
-    :param sample_weights: array of shape=(n_samples,)
-    :param n_outliers: int
-    :param L:
+    :param X: array of shape=(n_samples, n_features), data set
+    :param C: array of shape=(n_centers, n_features), centers
+    :param sample_weights: array of shape=(n_samples,), sample weights
+    :param n_outliers: int, number of outliers
+    :param L: None or float. if not None then all distances larger than L will be truncated
     :param element_wise: bool, whether to return the cost for each element in X
     :return:
     """
@@ -205,7 +200,7 @@ def kmeans_(X, sample_weights, n_clusters, init='kmeans++', max_iter=300):
 
 
 def k_means_my(X, n_clusters, sample_weights=None):
-    """ K-Means """
+    """K-Means by Lloyd's Algorithm"""
     n_samples, _ = X.shape
     if sample_weights is None:
         sample_weights = np.ones(n_samples)
@@ -301,7 +296,7 @@ class KZMeans(object):
     def cost(self, X, remove_outliers=True):
         """
 
-        :param X: array,
+        :param X: array of shape=(n_samples, n_features),
             data set
         :param remove_outliers: None or int, default None
             whether to remove outliers when computing the cost on X
@@ -327,11 +322,9 @@ class KMeansWrapped(object):
         self.n_clusters_ = n_clusters
         self.cluster_centers_ = None
         self.cost_func_ = kzmeans_cost_
-        # self.cluster_routine_ = KMeans(n_clusters)
 
     def cost(self, X, remove_outliers=True):
         """
-
         :param X: array,
             data set
         :param remove_outliers: None or int, default None
@@ -351,16 +344,8 @@ class KMeansWrapped(object):
         nearest, _ = pairwise_distances_argmin_min(X, self.cluster_centers_)
         return nearest
 
-    # def fit(self, X):
-    #     self.cluster_routine_.fit(X)
-    #     self.cluster_centers_ = self.cluster_routine_.cluster_centers_
-    #     return self
-    #
-    # def predict(self, X):
-    #     return self.cluster_routine_.predict(X)
 
-
-class BEL_DistributedKMeans(DistributedLpClustering):
+class BELDistributedKMeans(DistributedLpClustering):
     """
     Maria Florina Balcan, Steven Ehrlich, Yingyu Liang.
     Distributed k-Means and k-Median Clustering on General Topologies.

@@ -11,7 +11,7 @@ from time import time
 from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
 from sklearn.exceptions import NotFittedError
 from sklearn.utils import check_array
-from .misc import DistQueryOracle, distributedly_estimate_diameter, farthest_neighbor
+from .misc import DistQueryOracle, distributedly_estimate_diameter
 from ..utils import evenly_partition, debug_print
 
 
@@ -151,7 +151,7 @@ class DistributedKZCenter(object):
         """
         aggregated_samples = [np.random.choice(X.shape[0], size=self.n_clusters_ + self.n_outliers_, replace=False)
                               for X in Xs]
-        aggregated_samples = np.vstack(X[aggregated_samples[i]] for i, X in enumerate(Xs))
+        aggregated_samples = np.vstack([X[aggregated_samples[i]] for i, X in enumerate(Xs)])
         assert aggregated_samples.shape[0] <= self.n_machines_ * (self.n_clusters_ + self.n_outliers_)
         assert aggregated_samples.shape[1] == self.n_features_
 
@@ -169,7 +169,7 @@ class DistributedKZCenter(object):
         """
         aggregated_samples = [np.random.choice(X.shape[0], size=self.n_clusters_ + self.n_outliers_, replace=False)
                               for X in Xs]
-        aggregated_samples = np.vstack(X[aggregated_samples[i]] for i, X in enumerate(Xs))
+        aggregated_samples = np.vstack([X[aggregated_samples[i]] for i, X in enumerate(Xs)])
         assert aggregated_samples.shape[0] <= self.n_machines_ * (self.n_clusters_ + self.n_outliers_)
         assert aggregated_samples.shape[1] == self.n_features_
 
@@ -234,10 +234,8 @@ class DistributedKZCenter(object):
     def fit_icml2018_additive_(self, Xs, sample_weights=None, dist_oracles=None):
         """
         implementation for the `distr-kz-ctl-additive` method in our ICML2018 paper
+        Note: this method accepts but does NOT use the `sample_weights` and `dist_oracles` parameter.
         """
-        if sample_weights is None:
-            sample_weights = [None] * len(Xs)
-
         # Round 1
         self.n_machines_ = len(Xs)
         self.n_samples_ = sum(X.shape[0] for X in Xs)
@@ -305,9 +303,9 @@ class DistributedKZCenter(object):
         else:
             oracles = []
             for i in range(self.n_machines_):
-                oracles.append(DistQueryOracle(tree_algorithm='auto',
-                                               leaf_size=min(Xs[i].shape[0] // self.n_clusters_, 60))
-                               .fit(Xs[i]))
+                oracles.append(
+                    DistQueryOracle(tree_algorithm='auto', leaf_size=min(Xs[i].shape[0] // self.n_clusters_, 60))
+                    .fit(Xs[i]))
             print("Fitting oracles takes time {}".format(time()-t1))
 
         debug_print("Initialize mappers ...", debug=self.debugging)
@@ -651,19 +649,21 @@ def kzcenter_charikar_eg(X, sample_weight=None, guessed_opt=None,
     """
     Charikar's Method with epsilon-net support
 
-    :param X:
+    :param X: array of shape=(n_samples, n_features)
 
-    :param sample_weight:
+    :param sample_weight: array of shape=(n_samples,)
 
-    :param guessed_opt:
+    :param guessed_opt: float, a guess for the optimal radius
 
-    :param n_clusters:
+    :param n_clusters: int, number of cluster centers
 
-    :param n_outliers:
+    :param n_outliers: int, number of desired outliers.
 
-    :param delta:
+    :param delta: float, upperbound on the diameter of the data set.
 
-    :param dist_oracle:
+    :param dist_oracle: An DistQueryOracle object
+
+    :param return_opt: bool, if True then return the resulted cluters along with the radius
 
     :param densest_ball_radius: int, default 2,
         find the densest ball of radius densest_ball_radius * OPT
@@ -783,19 +783,21 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
     Moses Charikar, Samir Khuller, David M. Mount, and Giri Narasimhan.
     Algorithms for facility location problems with outliers. SODA'2001
 
-    :param X:
+    :param X: array of shape=(n_samples, n_features)
 
-    :param sample_weight:
+    :param sample_weight: array of shape=(n_samples,)
 
-    :param guessed_opt:
+    :param guessed_opt: float, a guess for the optimal radius
 
-    :param n_clusters:
+    :param n_clusters: int, number of cluster centers
 
-    :param n_outliers:
+    :param n_outliers: int, number of desired outliers.
 
-    :param delta:
+    :param delta: float, upperbound on the diameter of the data set.
 
-    :param dist_oracle:
+    :param dist_oracle: An DistQueryOracle object
+
+    :param return_opt: bool, if True then return the resulted cluters along with the radius
 
     :param densest_ball_radius: int, default 2,
         find the densest ball of radius densest_ball_radius * OPT
@@ -896,10 +898,10 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
 def kzcenter_brute(X, sample_weight=None, n_clusters=7, n_outliers=0):
     """
     Solve the (k,z)-center problem using brute-force
-    :param X:
-    :param sample_weight:
-    :param n_clusters:
-    :param n_outliers:
+    :param X: array of shape=(n_samples, n_features)
+    :param sample_weight: array of shape=(n_samples,)
+    :param n_clusters: int, number of cluster centers
+    :param n_outliers: int, number of desired outliers.
     :return: list of tuple of (array, int)
         List of (ball center, #points in the ball)
     """
@@ -907,7 +909,6 @@ def kzcenter_brute(X, sample_weight=None, n_clusters=7, n_outliers=0):
     n_distinct_points, _ = X.shape
     if sample_weight is None:
         sample_weight = np.ones(n_distinct_points)
-    n_samples = sum(sample_weight)
 
     if n_distinct_points <= n_clusters:
         return [(c, w) for c, w in zip(X, sample_weight)]
@@ -943,11 +944,11 @@ def kcenter_greedy(X, n_clusters=7, random_state=None,
     Dorit S. Hochbaum and David B. Shmoys.
     A best possible heuristic for the k-center problem.
     Math. Oper. Ues., 10(2):180–184, 1985.
-    :param X:
+    :param X: array of shape=(n_samples, n_features)
 
-    :param n_clusters:
+    :param n_clusters: int, number of cluster centers
 
-    :param random_state:
+    :param random_state: numpy.RandomState
 
     :param return_indices: bool, default False
         whether to return the indices of the choosed centers

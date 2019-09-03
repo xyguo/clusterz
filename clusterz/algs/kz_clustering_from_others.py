@@ -16,7 +16,7 @@ from .coreset import DistributedSummary
 from ..utils import debug_print
 
 
-class Guha_DistributedKZCenter(object):
+class GuhaDistributedKZCenter(object):
     """
     Sudipto Guha, Yi Li, and Qin Zhang.
     Distributed partial clustering.
@@ -80,7 +80,7 @@ class Guha_DistributedKZCenter(object):
     def cost(self, X, remove_outliers=True):
         """
 
-        :param X: array,
+        :param X: array of shape=(n_samples, n_features),
             data set
         :param remove_outliers: None or int, default None
             whether to remove outliers when computing the cost on X
@@ -115,7 +115,8 @@ class Guha_DistributedKZCenter(object):
         :param Xs: list of arrays of shape=(n_samples_i, n_features),
             Divided data set. Each array in the list represents a bunch of data
             that has been partitioned onto one machine.
-        :param dist_oracles:
+        :param sample_weights: Only for interface compatibility, not used.
+        :param dist_oracles: DistQueryOracle object
         :return self:
         """
         self.n_machines_ = len(Xs)
@@ -437,7 +438,7 @@ class Guha_DistributedKZCenter(object):
         return results
 
 
-class CAZ_DistributedKZClustering(object):
+class CAZDistributedKZClustering(object):
     """
     Jiecao Chen, Erfan Sadeqi Azer, Qin Zhang.
     A Practical Algorithm for Distributed Clustering and Outlier Detection.
@@ -519,7 +520,7 @@ class CAZ_DistributedKZClustering(object):
         return self
 
 
-class CAZ_DistributedKZMeans(CAZ_DistributedKZClustering):
+class CAZDistributedKZMeans(CAZDistributedKZClustering):
     """
     Jiecao Chen, Erfan Sadeqi Azer, Qin Zhang.
     A Practical Algorithm for Distributed Clustering and Outlier Detection.
@@ -543,7 +544,7 @@ class CAZ_DistributedKZMeans(CAZ_DistributedKZClustering):
                          random_state=random_state, debug=debug)
 
 
-class CAZ_DistributedKZMedian(CAZ_DistributedKZClustering):
+class CAZDistributedKZMedian(CAZDistributedKZClustering):
     """
     Jiecao Chen, Erfan Sadeqi Azer, Qin Zhang.
     A Practical Algorithm for Distributed Clustering and Outlier Detection.

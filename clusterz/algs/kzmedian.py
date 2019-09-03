@@ -16,11 +16,11 @@ from ..utils import compute_cost
 
 def kzmedian_cost_(X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False):
     """
-    :param X: array of shape=(n_samples, n_features)
-    :param C: array of shape=(n_centers, n_features)
-    :param sample_weights: array of shape=(n_samples,)
-    :param n_outliers: int
-    :param L:
+    :param X: array of shape=(n_samples, n_features), data set
+    :param C: array of shape=(n_centers, n_features), centers
+    :param sample_weights: array of shape=(n_samples,), sample weights
+    :param n_outliers: int, number of outliers
+    :param L: None or float. if not None then all distances larger than L will be truncated
     :param element_wise: bool, whether to return the cost for each element in X
     :return:
     """
@@ -89,7 +89,7 @@ def kmedian_pp_(X, sample_weights, n_clusters):
 
     :param X: array of shape=(n_samples, n_features)
     :param sample_weights: array of shape=(n_samples,)
-    :param n_clusters:
+    :param n_clusters: int, number of clusters
     :return centers: array of shape=(n_clusters, n_features)
     """
     n_samples, _ = X.shape
@@ -97,17 +97,17 @@ def kmedian_pp_(X, sample_weights, n_clusters):
     centers = [X[first_idx]]
     for i in range(n_clusters - 1):
         _, dist = pairwise_distances_argmin_min(X, centers)
-        probs = normalize((dist * sample_weights).reshape(1,-1), norm='l1')[0]
+        probs = normalize((dist * sample_weights).reshape(1, -1), norm='l1')[0]
         next_idx = np.random.choice(n_samples, 1, replace=True, p=probs)[0]
         centers.append(X[next_idx])
     return np.array(centers)
 
 
 def update_clusters_(X, centers, return_dist=False):
-    """
+    """assign each point in X to its nearest center
 
-    :param X:
-    :param centers:
+    :param X: array of shape=(n_samples, n_features), data set.
+    :param centers: array of shape=(n_centers, n_features), center points
     :param return_dist: whether to return the distances of each point to its nearest center
     :return clusters: list of arrays, each array consists of the indices
         for data in the same cluster. If some cluster has size less than 2 then
@@ -124,12 +124,13 @@ def update_clusters_(X, centers, return_dist=False):
 
 
 def update_centers_(X, sample_weights, clusters, outliers=None):
-    """
+    """Compute the new centers to be the weighted mean of each cluster
 
-    :param X:
-    :param sample_weights:
-    :param clusters:
-    :return centers:
+    :param X: array of shape=(n_samples, n_features), data set.
+    :param sample_weights: array of shape=(n_samples,), weights
+    :param clusters: list of arrays, each array of the indices for data in the same cluster.
+    :param outliers: array of shape=(n_outliers,), indices of outliers
+    :return centers: array of shape=(n_clusters, n_features)
     """
     centers = []
     for c in clusters:
@@ -160,7 +161,6 @@ def kmedian_mm_(X, sample_weights, n_clusters, n_outliers):
     cluster_centers_ = X[centers_idxs]
 
     diff = np.inf
-    i = 0
     while diff > 1e-3:
         clusters, dists = update_clusters_(X, cluster_centers_, return_dist=True)
 
@@ -217,7 +217,6 @@ def kmedian_(X, sample_weights, n_clusters, init='kmedian++'):
         cluster_centers_ = init
 
     diff = np.inf
-    i = 0
     while diff > 1e-3:
         clusters = update_clusters_(X, cluster_centers_)
         new_centers = update_centers_(X, sample_weights, clusters)
@@ -246,7 +245,7 @@ def k_median_my(X, n_clusters, sample_weights=None):
     if sample_weights is None:
         sample_weights = np.ones(n_samples)
     return kmedian_(X=X, sample_weights=sample_weights,
-                   n_clusters=n_clusters)
+                    n_clusters=n_clusters)
 
 
 def kmedian_cost_no_outlier_(X, C, sample_weights=None,
@@ -281,7 +280,7 @@ class KMedianWrapped(object):
     def cost(self, X, remove_outliers=True):
         """
 
-        :param X: array,
+        :param X: array of shape=(n_samples, n_features),
             data set
         :param remove_outliers: None or int, default None
             whether to remove outliers when computing the cost on X
@@ -301,7 +300,7 @@ class KMedianWrapped(object):
         return nearest
 
 
-class BEL_DistributedKMedian(DistributedLpClustering):
+class BELDistributedKMedian(DistributedLpClustering):
     """
     Maria Florina Balcan, Steven Ehrlich, Yingyu Liang.
     Distributed k-Means and k-Median Clustering on General Topologies.
