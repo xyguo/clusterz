@@ -11,13 +11,10 @@ A Practical Algorithm for Distributed Clustering and Outlier Detection, NIPS'18
 # Author: Xiangyu Guo     xiangyug[at]buffalo.edu
 #         Shi Li          shil[at]buffalo.edu
 
-import warnings
-import random
 import numpy as np
 
 from sklearn.cluster import KMeans
-from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
-from .misc import DistQueryOracle
+from sklearn.metrics.pairwise import pairwise_distances_argmin_min
 from ..utils import debug_print
 
 
@@ -221,6 +218,7 @@ class Coreset(object):
 
 class DistributedSummary(object):
     """
+    Implements the algorithm in the following paper:
     J. Chen, E. S. Azer, Q. Zhang,
     A Practical Algorithm for Distributed Clustering and Outlier Detection,
     NIPS'18
@@ -233,6 +231,7 @@ class DistributedSummary(object):
         :param n_outliers:
         :param alpha: parameter, determine the sample size
         :param beta: parameter, determine the ball radius
+        :param augmented: bool, whether to use Algorithm 2 to augment the summary
         :param debug: debugging flag
         """
         self.n_clusters_ = n_clusters
@@ -274,15 +273,15 @@ class DistributedSummary(object):
         """
         self.n_machines_ = len(Xs)
         mappers = []
-        all_samples, all_weights, all_indices = [],[], []
+        all_samples, all_weights, all_indices = [], [], []
         self.n_outliers_per_machine_ = self.n_outliers_ if self.adversary_ else 2 * self.n_outliers_ // self.n_machines_
 
         for X in Xs:
             m = SummaryOutliers(n_clusters=self.n_clusters_,
-                                           n_outliers=self.n_outliers_per_machine_,
-                                           alpha=self.alpha_,
-                                           beta=self.beta_,
-                                           augmented=self.augmented_)
+                                n_outliers=self.n_outliers_per_machine_,
+                                alpha=self.alpha_,
+                                beta=self.beta_,
+                                augmented=self.augmented_)
             m.fit(X)
             all_samples.append(m.samples)
             all_weights.append(m.weights)
@@ -302,10 +301,13 @@ class SummaryOutliers(object):
                  augmented=False):
         """
         Algorithm 1: Summary-Outliers
-        :param n_clusters:
-        :param n_outliers:
-        :param alpha: parameter, determine the sample size
-        :param beta: parameter, determine the ball radius
+        :param n_clusters: int, determine the summary size along with n_outliers and alpha. See the paper for details.
+        :param n_outliers: int, determine the summary size along with n_clusters and alpha. See the paper for details.
+        :param alpha: float > 0, scale of the sample size. The large alpha the larger the summary size.
+            See the paper for details.
+        :param beta: float between 0 and 1, determine the ball radius. Each point in the summary will cover a ball
+            that contains at least beta * n_samples points in the original data set.
+        :param augmented: bool, whether to use Algorithm 2 to augment the summary
         """
         self.n_clusters_ = n_clusters
         self.n_outliers_ = n_outliers
@@ -330,12 +332,10 @@ class SummaryOutliers(object):
 
     def fit(self, X):
         """
-
         :param X: array of shape=(n_samples, n_features)
-        :return:
+        :return self:
         """
         n_samples, _ = X.shape
-        i = 0
         samples_ = []
         weights_ = []
         sample_indices_ = []
@@ -367,9 +367,9 @@ class SummaryOutliers(object):
             X_i = X_i[distance > rho_i]
 
         # Augmented-Summary-Outliers (Algorithm 2 in the paper)
-        if self.augmented_:
-            return self.augmenting_(X, X_i,
-                                    np.hstack(sample_indices_))
+        if self.augmented_ and len(sample_indices_) > 0:
+            self.sample_indices_, self.weights_, self.samples_ = self.augmenting_(X, X_i, np.hstack(sample_indices_))
+            return self
 
         # append the remained "outliers"
         samples_.append(X[X_i])
@@ -386,11 +386,14 @@ class SummaryOutliers(object):
 
     def augmenting_(self, X, X_r, S):
         """
-        Augmented-Summary-Outliers (Algorithm 2 in the paper)
+        Augmented-Summary-Outliers (Algorithm 2 in the paper).
         :param X: data set, array of shape=(n_samples, n_features)
-        :param X_r: the indices of remained "outliers" after SummaryOutliers
-        :param S: the collected "inliers" after SummaryOutliers
-        :return self:
+        :param X_r: array of int, the indices of remained "outliers" after SummaryOutliers
+        :param S: array of int, indices of the collected "inliers" after SummaryOutliers
+        :return (augmented_sample_idxs, augmented_weights, augmented_samples):
+            augmented_sample_idxs: array of int, the indices of augmented summary in X
+            augmented_weights: array of float, the weight of each point in the augmented summary
+            augmented_samples: array of shape(n_summary, n_features), equals X[augmented_sample_idxs].
         """
         S_p_size = len(X_r) - len(S)
         X_idxs_set = set(np.arange(X.shape[0]))
@@ -413,8 +416,9 @@ class SummaryOutliers(object):
         # 4. count the weights
         idxs, weights = np.unique(nearest, return_counts=True)
 
-        self.sample_indices_ = S_and_S_p[idxs]
-        self.weights_ = weights
-        self.samples_ = X[self.sample_indices_]
+        S_and_S_p = np.array(S_and_S_p)
+        augmented_sample_idxs = S_and_S_p[idxs]
+        augmented_weights = weights
+        augmented_samples = X[augmented_sample_idxs]
 
-        return self
+        return augmented_sample_idxs, augmented_weights, augmented_samples
