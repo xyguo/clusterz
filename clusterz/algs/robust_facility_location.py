@@ -11,11 +11,6 @@ Mathematics of Operations Research, Vol. 35, No. 1 (Feb., 2010), pp. 79-101
 #         Shi Li          shil[at]buffalo.edu
 
 import numpy as np
-
-from sklearn.base import BaseEstimator, ClusterMixin
-from sklearn.metrics.pairwise import pairwise_distances
-from sklearn.exceptions import NotFittedError
-from sklearn.utils import check_array
 from ..utils import debug_print
 
 
@@ -69,7 +64,7 @@ def reverse_greedy_(distances, weights, client_set_residence, client_set_weight,
             # assert np.all(current_dists < np.inf)
             costs_inc = (future_dists - current_dists) * weights[cs]
             error_increase[i, client_set_residence[cs]] = 0
-            np.add.at(error_increase, [i, client_set_residence[cs]], costs_inc)
+            np.add.at(error_increase, (i, client_set_residence[cs]), costs_inc)
 
         # gather the points that increases error not so much
         can_remove = np.where(np.logical_and(available, np.all(error_increase <= B / 2, axis=1)))[0]
