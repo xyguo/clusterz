@@ -1,21 +1,21 @@
 from .kzcenter import DistributedKZCenter, KZCenter
-from .kzmedian import DistributedKZMedian, BEL_DistributedKMedian, kz_median, KZMedian, KMedianWrapped
-from .kzmeans import DistributedKZMeans, BEL_DistributedKMeans, kz_means, KZMeans, KMeansWrapped
+from .kzmedian import DistributedKZMedian, BELDistributedKMedian, kz_median, KZMedian, KMedianWrapped
+from .kzmeans import DistributedKZMeans, BELDistributedKMeans, kz_means, KZMeans, KMeansWrapped
 from .coreset import DistributedCoreset
 from .misc import DistQueryOracle
-from .kz_clustering_from_others import Guha_DistributedKZCenter, CAZ_DistributedKZMeans, CAZ_DistributedKZMedian
+from .kz_clustering_from_others import GuhaDistributedKZCenter, CAZDistributedKZMeans, CAZDistributedKZMedian
 
 __all__ = ['DistributedKZCenter',
            'KZCenter',
            'DistributedKZMedian',
            'DistributedKZMedian',
            'DistributedKZMeans',
-           'BEL_DistributedKMeans',
+           'BELDistributedKMeans',
            'DistributedCoreset',
            'DistQueryOracle',
-           'Guha_DistributedKZCenter',
+           'GuhaDistributedKZCenter',
            # temporary
            'kz_means', 'kz_median',
            'KZMeans', 'KZMedian',
-           'KMeansWrapped', 'KMedianWrapped'
-           ]
+           'KMeansWrapped',
+           'KMedianWrapped']
