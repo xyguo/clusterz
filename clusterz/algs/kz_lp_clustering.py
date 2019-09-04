@@ -210,7 +210,6 @@ class DistributedKZLpClustering(object):
         """
         if not opt_radius_lb or opt_radius_lb == 0:
             opt_radius_lb = 0.1
-        # upper bound is initialized as the sum of diameters across all machines
         if not opt_radius_ub or opt_radius_ub == np.inf:
             _, opt_radius_ub = distributedly_estimate_diameter(Xs, n_estimation=1)
 

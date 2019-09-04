@@ -346,7 +346,6 @@ class DistributedKZCenter(object):
         total_iters_at_most = self.n_clusters_ * self.n_machines_ * (1 + 1 / self.epsilon_)
         total_covered_at_least = max(self.n_samples_ - (1 + self.epsilon_) * self.n_outliers_, 1)
         lb = 0
-        # upper bound is initialized as the sum of diameters across all machines
         _, ub = distributedly_estimate_diameter(Xs, n_estimation=10)
         debug_print("Start guessing optimal radius in [{},{}]...".format(lb, ub),
                     debug=self.debugging)
