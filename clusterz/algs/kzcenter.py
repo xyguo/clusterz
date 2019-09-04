@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 from time import time
 
-from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min
+from sklearn.metrics.pairwise import pairwise_distances, pairwise_distances_argmin_min, pairwise_distances_argmin
 from sklearn.exceptions import NotFittedError
 from sklearn.utils import check_array
 from .misc import DistQueryOracle, distributedly_estimate_diameter
@@ -84,6 +84,10 @@ class DistributedKZCenter(object):
     @property
     def communication_cost(self):
         return self.communication_cost_
+
+    @property
+    def cluster_centers(self):
+        return self.cluster_centers_
 
     def cost(self, X, remove_outliers=None):
         """
@@ -259,7 +263,16 @@ class DistributedKZCenter(object):
         # determine the final sample size on each machine, i.e. n'_i
         p = [X.shape[0] / self.n_samples_ for X in Xs]
         samples_sizes = np.random.choice(self.n_machines_, size=n_final_samples_, replace=True, p=p)
-        _, samples_sizes_for_each_machine = np.unique(samples_sizes, return_counts=True)
+        machine_sampled, samples_sizes_for_each_machine = np.unique(samples_sizes, return_counts=True)
+        if len(machine_sampled) < self.n_machines_:
+            # in this case some machines are sampled 0 times, which is not good
+            not_sampled = set(range(self.n_machines_)).difference(set(machine_sampled))
+            augmentd_samples_sizes = np.zeros(self.n_machines_, dtype=np.int)
+            augmentd_samples_sizes[machine_sampled] = samples_sizes_for_each_machine
+            for i in not_sampled:
+                if len(Xs[i]) > 0:
+                    augmentd_samples_sizes[i] = 1
+            samples_sizes_for_each_machine = augmentd_samples_sizes
 
         # Round 3
         # each machine creates its own final samples
@@ -584,9 +597,9 @@ class KZCenter(object):
         """
         Greedily cover the data set with ball of specified size
         :param guessed_opt: the radius of the ball used for compressing the data set
-        :param X:
-        :param sample_weight:
-        :param reinitialize:
+        :param X: array of shape=(n_samples, n_features), data set
+        :param sample_weight: array of shape=(n_samples,)
+        :param reinitialize: deprecated, not used.
         :return results: list of (array, int)
             List of (ball center, #points in the ball)
         """
@@ -689,8 +702,11 @@ def kzcenter_charikar_eg(X, sample_weight=None, guessed_opt=None,
 
     # estimate the upperbound and lowerbound of opt for the data set
     _, ub = dist_oracle.estimate_diameter(n_estimation=10)
-    lb, _ = dist_oracle.kneighbors(X[np.random.randint(0, n_distinct_points)].reshape(1, -1), k=2)
-    lb = np.max(lb)
+    lb = np.inf
+    for _ in range(10):
+        lb_tmp, _ = dist_oracle.kneighbors(X[np.random.choice(n_distinct_points, 1, p=sample_weight / n_samples)].reshape(1, -1), k=2)
+        lb_tmp = np.max(lb_tmp)
+        lb = min(lb, lb_tmp)
 
     # creat a epsilon-net for faster searching for opt
     L = max(lb, 1e-2)
@@ -793,7 +809,7 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
 
     :param n_outliers: int, number of desired outliers.
 
-    :param delta: float, upperbound on the diameter of the data set.
+    :param delta: float, the ratio of the geometric sequence that used to guess the opt.
 
     :param dist_oracle: An DistQueryOracle object
 
@@ -806,7 +822,7 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
         remove the ball of radius removed_ball_radius * OPT
 
     :return results: list of (array, int)
-            List of (ball center, #points in the ball)
+            List of (ball center, #total weights in the ball)
     """
     if dist_oracle is None:
         dist_oracle = DistQueryOracle(tree_algorithm='auto')
@@ -823,8 +839,11 @@ def kzcenter_charikar(X, sample_weight=None, guessed_opt=None,
 
     # estimate the upperbound and lowerbound of opt for the data set
     _, ub = dist_oracle.estimate_diameter(n_estimation=10)
-    lb, _ = dist_oracle.kneighbors(X[np.random.randint(0, n_distinct_points)].reshape(1, -1), k=2)
-    lb = np.max(lb)
+    lb = np.inf
+    for _ in range(10):
+        lb_tmp, _ = dist_oracle.kneighbors(X[np.random.choice(n_distinct_points, 1, p=sample_weight / n_samples)].reshape(1, -1), k=2)
+        lb_tmp = np.max(lb_tmp)
+        lb = min(lb, lb_tmp)
 
     if guessed_opt is not None:
         guessed_opt = min(guessed_opt, ub)
@@ -919,22 +938,27 @@ def kzcenter_brute(X, sample_weight=None, n_clusters=7, n_outliers=0):
         idx = list(sol)  # because sol is a tuple
         cs = X[list(idx)]
         _, dists = pairwise_distances_argmin_min(X, cs, axis=1)
-        sorted_dist_idxs = np.argsort(dists)
+        sorted_dist_idxs = np.argsort(dists)[::-1]
         can_remove = 0
         farthest = 0
 
         # count how many weights can be removed
-        while farthest < len(dists) and can_remove <= n_outliers:
+        while farthest < len(dists) and can_remove < n_outliers:
             can_remove += sample_weight[sorted_dist_idxs[farthest]]
             farthest += 1
 
-        costs.append((idx, dists[sorted_dist_idxs[farthest - 1]]))
+        costs.append((idx, dists[sorted_dist_idxs[farthest]], sorted_dist_idxs[:farthest]))
 
-    opt_centers, cost = min(costs, key=lambda c: c[1])
+    opt_centers, cost, outliers_idx = min(costs, key=lambda c: c[1])
     opt_centers = X[opt_centers]
-    n_covered = np.unique([np.argmin(np.linalg.norm(x - opt_centers, axis=1)) for x in X],
-                          return_counts=True)
-    return list(zip(opt_centers, n_covered[1]))
+    inliers_idx = list(set.difference(set(np.arange(n_distinct_points)),
+                                      set(outliers_idx)))
+    X, sample_weight = X[inliers_idx], sample_weight[inliers_idx]
+    _, assignment = np.unique(pairwise_distances_argmin(X, opt_centers),
+                              return_inverse=True)
+    cluster_weight = [sample_weight[np.where(assignment == i)[0]].sum()
+                      for i in range(n_clusters)]
+    return list(zip(opt_centers, cluster_weight))
 
 
 def kcenter_greedy(X, n_clusters=7, random_state=None,
