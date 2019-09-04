@@ -132,17 +132,21 @@ def update_centers_(X, sample_weights, clusters, outliers=None):
     :param outliers: array of shape=(n_outliers,), indices of outliers
     :return centers: array of shape=(n_clusters, n_features)
     """
+    _, n_features = X.shape
     centers = []
     for c in clusters:
         if outliers is not None:
             c = list(set(c).difference(outliers))
         # find the weighted median
-        sorted_ft_idxs = np.argsort(X[c], axis=0)
-        sorted_sw = sample_weights[c][sorted_ft_idxs]
-        sorted_cum_sw = np.cumsum(sorted_sw, axis=0)
+        X_c, sw_c = X[c].T, sample_weights[c]
+        sorted_ft_idxs = np.argsort(X_c, axis=1)
+        sorted_sw = sw_c[sorted_ft_idxs]
+        sorted_cum_sw = np.cumsum(sorted_sw, axis=1)
         wm_idx = np.apply_along_axis(lambda a: a.searchsorted(a[-1]/2),
-                                     axis=0, arr=sorted_cum_sw)
-        centers.append(X[c][sorted_ft_idxs[wm_idx], np.arange(X.shape[1])])
+                                     axis=1, arr=sorted_cum_sw)
+        wm_idx_in_X_c = sorted_ft_idxs[(np.arange(n_features), wm_idx)]
+        centers.append(X_c[(np.arange(n_features), wm_idx_in_X_c)])
+
     return np.array(centers)
 
 
