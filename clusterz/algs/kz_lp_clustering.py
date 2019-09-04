@@ -139,6 +139,10 @@ class DistributedKZLpClustering(object):
     def communication_cost(self):
         return self.communication_cost_
 
+    @property
+    def cluster_centers(self):
+        return self.cluster_centers_
+
     def cost(self, X, remove_outliers=True):
         """
 
@@ -205,7 +209,7 @@ class DistributedKZLpClustering(object):
         distributed data set
         """
         if not opt_radius_lb or opt_radius_lb == 0:
-            opt_radius_lb = 1
+            opt_radius_lb = 0.1
         # upper bound is initialized as the sum of diameters across all machines
         if not opt_radius_ub or opt_radius_ub == np.inf:
             _, opt_radius_ub = distributedly_estimate_diameter(Xs, n_estimation=1)
