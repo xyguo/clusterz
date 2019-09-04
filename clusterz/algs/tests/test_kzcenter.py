@@ -101,21 +101,21 @@ class MyTestCase(unittest.TestCase):
         _, dist = pairwise_distances_argmin_min(true_centers, centers)
         if dist.max() > max_dist:
             print("\ndist.max = {} but max_dist = {}".format(dist.max(), max_dist))
-        assert dist.max() <= max_dist
+        return dist.max() <= max_dist
 
     def test_kzcenter_brute(self):
         clusters = kzcenter_brute(self.toyX_with_outliers,
                                   sample_weight=self.toy_random_weight_,
                                   n_clusters=2, n_outliers=2)
         centers = np.array([cw[0] for cw in clusters])
-        self.is_centers_match(self.centers_, centers)
+        assert self.is_centers_match(self.centers_, centers)
 
         clusters = kzcenter_brute(self.toyX_with_outliers,
                                   sample_weight=None,
                                   n_clusters=2, n_outliers=2)
         centers = np.array([cw[0] for cw in clusters])
         n_covered = np.array([cw[1] for cw in clusters])
-        self.is_centers_match(self.centers_, centers)
+        assert self.is_centers_match(self.centers_, centers)
         assert_array_equal(n_covered, np.ones(2) * 11)
 
     def test_kzcenter_charikar(self):
@@ -124,14 +124,14 @@ class MyTestCase(unittest.TestCase):
                                      n_clusters=2, n_outliers=2)
         centers = np.array([cw[0] for cw in clusters])
         # charikar's method is a 3-approx
-        self.is_centers_match(self.centers_, centers, max_dist=6.001)
+        assert self.is_centers_match(self.centers_, centers, max_dist=6.001)
 
     def test_kzcenter_charikar_eg(self):
         clusters = kzcenter_charikar_eg(self.X_with_outliers_,
                                         sample_weight=self.random_weight_, n_clusters=2, n_outliers=2)
         centers = np.array([cw[0] for cw in clusters])
         # charikar's method is a 3-approx
-        self.is_centers_match(self.centers_, centers, max_dist=6.001)
+        assert self.is_centers_match(self.centers_, centers, max_dist=6.001)
 
     def test_kcenter_greedy(self):
         X = self.X_without_outliers_.copy()
@@ -150,8 +150,8 @@ class MyTestCase(unittest.TestCase):
                 dist_oracle=None,
                 guessed_opt=6.01)
         centers = kzc.cluster_centers
-        self.is_centers_match(self.centers_, centers,
-                              max_dist=6.2, match_shape=False)
+        assert self.is_centers_match(self.centers_, centers,
+                                     max_dist=6.2, match_shape=False)
 
     def test_DistributedKZCenter(self):
         # test the main algorithm that achieves multiplicative error
@@ -159,21 +159,21 @@ class MyTestCase(unittest.TestCase):
                                      n_clusters=2, n_outliers=2, n_machines=2)
         dkzc_m.fit(Xs=self.Xs_with_outliers_,
                    sample_weights=self.random_weights_)
-        self.is_centers_match(self.centers_, dkzc_m.cluster_centers, max_dist=6.001)
+        assert self.is_centers_match(self.centers_, dkzc_m.cluster_centers, max_dist=6.001)
 
         # test the secondary algorithm that achieves additive error
         dkzc_a = DistributedKZCenter(algorithm='additive', sample_size=64,
                                      n_clusters=2, n_outliers=2, n_machines=2)
         dkzc_a.fit(Xs=self.Xs_with_outliers_,
                    sample_weights=self.uniform_weights_)
-        self.is_centers_match(self.centers_, dkzc_a.cluster_centers, max_dist=6.001)
+        assert self.is_centers_match(self.centers_, dkzc_a.cluster_centers, max_dist=6.001)
 
         # test the algorithm by moseley
         dkzc_moseley = DistributedKZCenter(algorithm='moseley',
                                            n_clusters=2, n_outliers=2, n_machines=2)
         dkzc_moseley.fit(Xs=self.Xs_with_outliers_,
                          sample_weights=self.random_weights_)
-        self.is_centers_match(self.centers_, dkzc_moseley.cluster_centers, max_dist=6.001)
+        assert self.is_centers_match(self.centers_, dkzc_moseley.cluster_centers, max_dist=6.001)
 
 if __name__ == '__main__':
     unittest.main()
