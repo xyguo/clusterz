@@ -26,7 +26,8 @@ def _brute_force_knn(X, centers, k, return_distance=True):
     else:
         dists = pairwise_distances(centers, X)
         nearest = np.argsort(dists, axis=1)[:, :k]
-        return (dists[nearest], nearest) if return_distance else nearest
+        return (np.vstack([dists[i, nearest[i]] for i in range(dists.shape[0])]),
+                nearest) if return_distance else nearest
 
 
 def _brute_force_ball_within_dataset(X, center_idxs, radius,
@@ -108,7 +109,7 @@ def estimate_diameter(X, n_estimation=1, metric='minkowski'):
         data set
     :param n_estimation: number of sampled estimation points
     :param metric: {'minkowski'}
-    :return: (lower_bound, upper_bound)
+    :return diam: tuple, (lower_bound, upper_bound)
     """
     X = check_array(X, ensure_2d=True)
     if metric == 'minkowski':
@@ -132,7 +133,9 @@ def distributedly_estimate_diameter(Xs, n_estimation=10):
     """
     n_machines = len(Xs)
 
-    # sample base points
+    # sample base points.
+    # each base points give a diameter estimations (lb, ub=2 * lb) for the whole data set,
+    # the final estimation is simply the intersection of all such intervals.
     machines = np.random.choice(n_machines, n_estimation, replace=True)
     base_points = []
     for m in machines:
@@ -149,7 +152,7 @@ class DistQueryOracle(object):
 
     def __init__(self, tree_algorithm='auto', leaf_size=60,
                  metric='minkowski', precompute_distances='auto',
-                 random_state=None):
+                 random_state=None, debugging=False):
         """
         :param tree_algorithm: string in {'auto', 'kd_tree', 'ball_tree', 'brute', 'lsh'}
             determines the
@@ -171,6 +174,8 @@ class DistQueryOracle(object):
             If int, random_state is the seed used by the random number generator;
             If RandomState instance, random_state is the random number generator;
             If None, the random number generator is the RandomState instance used by np.random.
+
+        :param debugging: bool, default False, whether to print debugging and User warning info
         """
         self.tree_algorithm = tree_algorithm
         self.leaf_size = leaf_size
@@ -178,6 +183,7 @@ class DistQueryOracle(object):
         # TODO: add pre-computed distance matrix
         self.precompute_distances = precompute_distances
         self.random_state_ = random_state
+        self.debugging_ = debugging
 
         self.nn_tree_ = None
         self.ball_oracle_ = None
@@ -328,47 +334,6 @@ class DistQueryOracle(object):
         # assert len(densest_ball) > 0
         return densest_center, densest_ball
 
-    def brute_force_densest_ball(self, radius, except_for=None, within_idx=None, return_idx=False):
-        """Method specifically optimized for brute force ball query
-        :param radius: float, radius of the ball
-        :param except_for: iterable or set,
-            indices of points that should not be considered
-        :param within_idx:
-        :param return_idx:
-        :return (densest_center, densest_ball): (array of shape=(n_features,), array of shape=(n_covered,)
-            the center of the densest ball as well as the index of points the ball covers
-        """
-        if except_for is None:
-            except_for = []
-        changed = set(np.arange(self.n_samples_)).difference(except_for)
-        changed = np.array(list(changed))
-
-        if self.ball_oracle_ is None:
-            raise NotFittedError("Tree hasn't been fitted yet\n")
-
-        if except_for is not None and len(except_for) == self.n_samples_:
-            return None, None
-
-        if self.unweightted_:
-            ball_sizes = _brute_force_ball_within_dataset(X=self.fitted_data_, center_idxs=changed,
-                                                          radius=radius, sorted_distances=self.sorted_distance_cache_,
-                                                          sorted_idxs=self.sorted_dist_idxs_, count_only=True)
-            densest_idx = changed[np.argmax(ball_sizes)]
-        else:
-            balls = _brute_force_ball_within_dataset(X=self.fitted_data_, center_idxs=changed,
-                                                     radius=radius, sorted_distances=self.sorted_distance_cache_,
-                                                     sorted_idxs=self.sorted_dist_idxs_, count_only=False)
-            densest_idx, _ = max(
-                ((i, self.data_weight_[b].sum()) for i, b in enumerate(balls)),
-                key=lambda a: a[1]
-            )
-        densest_center = self.fitted_data_[densest_idx]
-        densest_ball = _brute_force_ball_within_dataset(X=self.fitted_data_, center_idxs=densest_idx,
-                                                        radius=radius, sorted_distances=self.sorted_distance_cache_,
-                                                        sorted_idxs=self.sorted_dist_idxs_, count_only=False)
-        densest_ball = densest_ball[0]
-        return densest_center, densest_ball
-
     def init_all_densest_ball_faster_but_dirty(self, radius):
         self.ball_radius_cache_ = radius
         balls = self.ball_oracle_(self.fitted_data_, radius)
@@ -410,7 +375,7 @@ class DistQueryOracle(object):
             self.ball_cache_ = [None] * self.n_samples_
             self.cache_inconsistent_ = False
 
-        if self.cache_inconsistent_:
+        if self.cache_inconsistent_ and self.debugging_:
             warnings.warn("Cache is inconsistent, may get outdated result\n", UserWarning)
 
         if self.ball_weight_cache_ is None:
