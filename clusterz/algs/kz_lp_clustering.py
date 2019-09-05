@@ -18,6 +18,8 @@ from .coreset import DistributedCoreset
 from ..utils import debug_print, compute_cost
 
 
+# TODO: make the cost_func a class to unify interfaces
+# cost_func(X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False)
 def lp_cost_(p, X, C, sample_weights=None, n_outliers=0, L=None, element_wise=False):
     """
     compute the cost of \sum_{x\in X} \min(d(x, C), L)^p - L^p
@@ -115,6 +117,7 @@ class DistributedKZLpClustering(object):
         if cost_func is None:
             cost_func = lambda X, C, **kwargs: lp_cost_(self.p, X, C, **kwargs)
         self.cost_func = cost_func
+
         if pairwise_dist_func is None:
             pairwise_dist_func = lambda X, C: pairwise_lp_dist_(self.p, X, C)
         self.pairwise_dist_func = pairwise_dist_func
@@ -264,7 +267,8 @@ class DistributedKZLpClustering(object):
                 sample_size=coreset_size,
                 pre_clustering_method=self.pre_clustering_routine,
                 n_pre_clusters=self.n_pre_clusters,
-                cost_func=lambda X, C: self.cost_func(X, C, n_outliers=0, L=guessed_opt)
+                cost_func=lambda X, C, element_wise=True: self.cost_func(X, C, sample_weights=None, n_outliers=0,
+                                                                         L=guessed_opt, element_wise=element_wise)
             )
             # cache data for efficient coreset sampling
             pre_clustering_costs = [np.minimum(c, guessed_opt) for c in pre_clustering_costs_cache]
