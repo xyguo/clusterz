@@ -28,11 +28,11 @@ class DistributedCoreset(object):
         """
         :param sample_size: int,
             total size of the final coreset
-        :param cost_func: function of type costs=cost_func(X, C),
+        :param cost_func: function of type costs=cost_func(X, C, element_wise),
             where X is an array of shape=(n_samples, n_features) that represents the data set,
         and C is an array of shape=(n_centers, n_features) that represents the centers.
-        The return value is an array of shape=(n_samples,) that contains the corresponding cost
-        for each data point in X.
+        If element_wise=True, the return value is an array of shape=(n_samples,) that contains
+        the corresponding cost for each data point in X.
         :param debug: bool,
             whether to toggle on debug output
         :param pre_clustering_method: clustering method,
@@ -61,7 +61,16 @@ class DistributedCoreset(object):
         return self.samples_, self.weights_
 
     @property
+    def samples(self):
+        return self.samples_
+
+    @property
+    def sample_weights(self):
+        return self.weights_
+
+    @property
     def sample_indices(self):
+        """a list of tuples (m_id, s_id) corresponding to the s_id-th sample from m_id-th machine"""
         return self.sample_indices_
 
     def fit(self, Xs, pre_cluster_centers=None, pre_clusters=None, pre_clustering_costs=None):
@@ -71,10 +80,10 @@ class DistributedCoreset(object):
             Divided data set. Each array in the list represents a bunch of data
             that has been partitioned onto one machine.
         :param pre_cluster_centers: None or list of arrays of shape=(n_pre_clusters_i, n_features),
-            given pre-cluster centers for coreset sampling. If None, then the fit method will
-            construct pre-clusters via self.pre_clustering_method.
-        :param pre_clusters: list of arrays of shape=(n_pre_clusters_i, cluster_size_i)
-            indices of data that are within each pre-clusters
+            pre_cluster_centers[i][j] is the jth pre-cluster center on the ith machine. If None, then
+            the fit method will construct pre-clusters via self.pre_clustering_method.
+        :param pre_clusters: list of arrays of shape=(n_samples_i,)
+            pre_clusters[i][j] indicates which pre-cluster center the jth point on ith machine belongs to
         :param pre_clustering_costs: None or list of arrays of shape=(n_samples_i, )
             pre-clustering cost of each samples
         :return self:
@@ -98,11 +107,9 @@ class DistributedCoreset(object):
 
         # initialize pre-cluster affiliation
         if not pre_clusters:
-            dists = [np.array([[self.cost_func(Xs[i][j].reshape(-1, 1), c.reshape(-1,1))
-                                for c in pre_cluster_centers[i]]
-                               for j in range(Xs[i].shape[0])])
+            dists = [np.array([self.cost_func(Xs[i], c.reshape(1, -1)) for c in pre_cluster_centers[i]])
                      for i in range(self.n_machines)]
-            pre_clusters = [np.argmin(d, axis=1) for d in dists]
+            pre_clusters = [np.argmin(d, axis=0) for d in dists]
 
         # initialize pre-cluster costs
         if pre_clustering_costs:
@@ -152,6 +159,8 @@ class DistributedCoreset(object):
         self.samples_ = np.vstack(all_samples)
         self.weights_ = np.hstack(all_weights)
 
+        # since the self.samples_ contains the coreset samples as well as the pre-cluster centers
+        # the total number of indices in self.sample_indices_ is less than len(self.samples_)
         self.sample_indices_ = [list(map(lambda x: (i, x), mappers[i].sample_indices))
                                 for i in range(self.n_machines)]
         return self
@@ -185,6 +194,14 @@ class Coreset(object):
     @property
     def sample_indices(self):
         return self.sample_indices_
+
+    @property
+    def sample_weights(self):
+        return self.sample_weights_
+
+    @property
+    def samples(self):
+        return self.samples_
 
     @property
     def coreset(self):
@@ -402,9 +419,12 @@ class SummaryOutliers(object):
         X_minus_X_r_and_S = list(X_idxs_set.difference(X_r_set.union(S_set)))
 
         # 2. Sample S' of size |X_r|-|S| from X\(X_r\cup S)
-        S_p = np.random.choice(X_minus_X_r_and_S,
+        if S_p_size > 0:
+            S_p = np.random.choice(X_minus_X_r_and_S,
                                size=S_p_size, replace=True)
-        S_p = np.unique(S_p)
+            S_p = np.unique(S_p)
+        else:
+            S_p = []
 
         # 3. construct \pi(x)
         S_and_S_p = list(S_set.union(S_p))
