@@ -162,14 +162,17 @@ def kmedian_mm_(X, sample_weights, n_clusters, n_outliers):
     n_samples, n_features = X.shape
     # TODO: find a better way to handle negtive weights
     centers_idxs = np.random.choice(n_samples, n_clusters, replace=False)
-    cluster_centers_ = X[centers_idxs]
+    cluster_centers_ = np.atleast_2d(X[centers_idxs])
 
     diff = np.inf
     while diff > 1e-3:
         clusters, dists = update_clusters_(X, cluster_centers_, return_dist=True)
 
         # ignore the outliers when updating centers
-        outliers = np.argsort(dists)[-n_outliers:]
+        if n_outliers > 0:
+            outliers = np.argsort(dists)[-n_outliers:]
+        else:
+            outliers = None
         new_centers = update_centers_(X, sample_weights, clusters, outliers=outliers)
         diff = np.linalg.norm(new_centers - cluster_centers_)
         cluster_centers_ = new_centers

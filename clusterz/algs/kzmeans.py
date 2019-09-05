@@ -230,7 +230,7 @@ def kmeans_mm_(X, sample_weights, n_clusters, n_outliers, init='kmeans++', max_i
         cluster_centers_ = kmeans_pp_(X, np.clip(sample_weights, 0, np.inf), n_clusters)
     elif init == 'random':
         centers_idxs = np.random.choice(n_samples, n_clusters, replace=False)
-        cluster_centers_ = X[centers_idxs]
+        cluster_centers_ = np.atleast_2d(X[centers_idxs])
     elif isinstance(init, np.ndarray):
         cluster_centers_ = init
 
@@ -243,7 +243,10 @@ def kmeans_mm_(X, sample_weights, n_clusters, n_outliers, init='kmeans++', max_i
         clusters, dists = update_clusters_(X, cluster_centers_, return_dist=True)
 
         # ignore the outliers when updating centers
-        outliers = np.argsort(dists)[-n_outliers:]
+        if n_outliers > 0:
+            outliers = np.argsort(dists)[-n_outliers:]
+        else:
+            outliers = None
         new_centers = update_centers_(X, sample_weights, clusters, outliers=outliers)
         if len(new_centers) == len(cluster_centers_):
             diff = np.linalg.norm(new_centers - cluster_centers_)
