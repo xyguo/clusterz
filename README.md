@@ -5,7 +5,7 @@ This is the experiment code for our paper
 
 ## Requirement
 * Python >= 3.4
-* `numpy` and `scipy`
+* `numpy` >= 1.15 and `scipy` >= 1.2.0
 * `scikit-learn` >= 17.0
 
 
